@@ -104,12 +104,20 @@ class ScannerApp(tk.Tk):
         self.lbl_progress = ttk.Label(run_frame, text="대기 중")
         self.lbl_progress.pack(side="left", padx=6)
 
-        # 결과 탭
-        notebook = ttk.Notebook(self)
-        notebook.pack(fill="both", expand=True, **pad)
+        # 결과: 탭이 아니라 위/아래로 같이 보이게 표시
+        result_frame = ttk.Frame(self)
+        result_frame.pack(fill="both", expand=True, **pad)
+        result_frame.rowconfigure(0, weight=3)
+        result_frame.rowconfigure(1, weight=2)
+        result_frame.columnconfigure(0, weight=1)
 
-        self.tree_hits = self._make_tree(notebook, "🟢 조건 충족")
-        self.tree_knives = self._make_tree(notebook, "⚠️ 칼날 주의(하락추세)")
+        hits_box = ttk.LabelFrame(result_frame, text="🟢 조건 충족 — 대형주 + 상승추세 + 눌림")
+        hits_box.grid(row=0, column=0, sticky="nsew", pady=(0, 4))
+        self.tree_hits = self._make_tree(hits_box, height=10)
+
+        knives_box = ttk.LabelFrame(result_frame, text="⚠️ 칼날 주의 — 눌림은 왔지만 하락추세(200일선 아래)")
+        knives_box.grid(row=1, column=0, sticky="nsew", pady=(4, 0))
+        self.tree_knives = self._make_tree(knives_box, height=7)
 
         # 로그
         log_frame = ttk.LabelFrame(self, text="로그")
@@ -117,15 +125,15 @@ class ScannerApp(tk.Tk):
         self.txt_log = tk.Text(log_frame, height=8, state="disabled")
         self.txt_log.pack(fill="both", expand=True, padx=4, pady=4)
 
-    def _make_tree(self, parent, tab_title):
+    def _make_tree(self, parent, height=10):
         frame = ttk.Frame(parent)
-        parent.add(frame, text=tab_title)
+        frame.pack(fill="both", expand=True)
         cols = ("name", "code", "mcap", "price", "pullback", "above_ma")
         headers = {
             "name": "종목명", "code": "코드", "mcap": "시총(억)",
             "price": "현재가", "pullback": "눌림(%)", "above_ma": "200일선위(%)",
         }
-        tree = ttk.Treeview(frame, columns=cols, show="headings", height=12)
+        tree = ttk.Treeview(frame, columns=cols, show="headings", height=height)
         for c in cols:
             tree.heading(c, text=headers[c])
             tree.column(c, width=120, anchor="center")
@@ -227,8 +235,8 @@ class ScannerApp(tk.Tk):
                     self._append_log(item[1])
                 elif kind == "done":
                     _, hits, knives, scanned, uni_len = item
-                    self._fill_tree(self.tree_hits, hits, "🟢")
-                    self._fill_tree(self.tree_knives, knives, "⚠️")
+                    self._fill_tree(self.tree_hits, hits)
+                    self._fill_tree(self.tree_knives, knives)
                     self._last_hits, self._last_knives = hits, knives
                     self.btn_export.configure(state="normal" if (hits or knives) else "disabled")
                     self.lbl_progress.configure(text=f"완료 — 조회 {scanned}/{uni_len}, 충족 {len(hits)}, 칼날 {len(knives)}")
@@ -245,15 +253,14 @@ class ScannerApp(tk.Tk):
         self.btn_run.configure(state="normal")
         self.btn_stop.configure(state="disabled")
 
-    def _fill_tree(self, tree, rows, mark=""):
+    def _fill_tree(self, tree, rows):
         for item in tree.get_children():
             tree.delete(item)
         for name, code, mcap, price, pb, above in rows[: self.var_max_show.get()]:
             mc = f"{mcap:,}" if mcap else "-"
-            label = f"{mark} {name}" if mark else name
             tree.insert(
                 "", "end",
-                values=(label, code, mc, f"{price:,}", f"{pb:.1f}", f"{above:.1f}"),
+                values=(name, code, mc, f"{price:,}", f"{pb:.1f}", f"{above:.1f}"),
             )
 
     def _set_log(self, text):
