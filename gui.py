@@ -227,8 +227,8 @@ class ScannerApp(tk.Tk):
                     self._append_log(item[1])
                 elif kind == "done":
                     _, hits, knives, scanned, uni_len = item
-                    self._fill_tree(self.tree_hits, hits)
-                    self._fill_tree(self.tree_knives, knives)
+                    self._fill_tree(self.tree_hits, hits, "🟢")
+                    self._fill_tree(self.tree_knives, knives, "⚠️")
                     self._last_hits, self._last_knives = hits, knives
                     self.btn_export.configure(state="normal" if (hits or knives) else "disabled")
                     self.lbl_progress.configure(text=f"완료 — 조회 {scanned}/{uni_len}, 충족 {len(hits)}, 칼날 {len(knives)}")
@@ -245,14 +245,15 @@ class ScannerApp(tk.Tk):
         self.btn_run.configure(state="normal")
         self.btn_stop.configure(state="disabled")
 
-    def _fill_tree(self, tree, rows):
+    def _fill_tree(self, tree, rows, mark=""):
         for item in tree.get_children():
             tree.delete(item)
         for name, code, mcap, price, pb, above in rows[: self.var_max_show.get()]:
             mc = f"{mcap:,}" if mcap else "-"
+            label = f"{mark} {name}" if mark else name
             tree.insert(
                 "", "end",
-                values=(name, code, mc, f"{price:,}", f"{pb:.1f}", f"{above:.1f}"),
+                values=(label, code, mc, f"{price:,}", f"{pb:.1f}", f"{above:.1f}"),
             )
 
     def _set_log(self, text):
