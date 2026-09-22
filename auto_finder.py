@@ -28,12 +28,13 @@ PULLBACK_PCT = 5.0      # 눌림 기준(%). 20일 고점 대비
 LOOKBACK     = 20       # 고점 산정 거래일
 MA_PERIOD    = 200      # 추세 판단 이동평균 (현재가 > 200일선 = 상승추세)
 MAX_SHOW     = 25       # 결과 최대 표시 개수
+MIN_AVG_TRADE_VALUE_억 = 30   # 최소 평균거래대금(억원). LOOKBACK일 평균, 유동성 없는 종목 제외
 
 
 def _fetch_history(code6: str, min_rows: int = 210):
     """
     200일선 계산용 장기 일봉. KIS 일봉은 1회 ~100개라 날짜창을 뒤로 밀며 모은다.
-    반환: 최신순 [{date, high, low, close}, ...]  (실패 시 None)
+    반환: 최신순 [{date, high, low, close, volume}, ...]  (실패 시 None)
     """
     collected = {}
     end = datetime.now()
@@ -62,9 +63,10 @@ def _fetch_history(code6: str, min_rows: int = 210):
                 continue
             collected[d] = {
                 "date": d,
-                "high":  kf._i(it.get("stck_hgpr"), 0),
-                "low":   kf._i(it.get("stck_lwpr"), 0),
-                "close": c,
+                "high":   kf._i(it.get("stck_hgpr"), 0),
+                "low":    kf._i(it.get("stck_lwpr"), 0),
+                "close":  c,
+                "volume": kf._i(it.get("acml_vol"), 0),
             }
             dates.append(d)
         if len(collected) >= min_rows or not dates:
@@ -119,6 +121,7 @@ def run_scan(
     pullback_pct: float = PULLBACK_PCT,
     lookback: int = LOOKBACK,
     ma_period: int = MA_PERIOD,
+    min_avg_trade_value_억: float = MIN_AVG_TRADE_VALUE_억,
     progress_cb=None,
     stop_flag=None,
     log_cb=None,
@@ -130,7 +133,12 @@ def run_scan(
     stop_flag() -> bool                  : True 를 반환하면 중단
     log_cb(str)                          : 로그 메시지 전달
 
-    hits / knives 원소: (name, code, mcap억, price, pullback%, above_ma%)
+    거래대금(유동성) 조건: 최근 lookback일 평균거래대금이 min_avg_trade_value_억
+    미만이면 제외한다. 매매가 뜸한 종목(허수 눌림)을 걸러내기 위함.
+
+    hits / knives 원소:
+      (name, code, mcap억, price, pullback%, above_ma%, avg_trade_value억, vol_ratio)
+      vol_ratio = 최근 거래일 거래량 / lookback일 평균거래량 (1.0 = 평균과 동일)
     """
     def log(msg):
         if log_cb:
@@ -172,6 +180,17 @@ def run_scan(
         ma_n = min(ma_period, len(closes))
         ma_val = sum(closes[:ma_n]) / ma_n
 
+        volumes = [d["volume"] for d in window]
+        avg_vol = sum(volumes) / len(volumes) if volumes else 0
+        avg_trade_value_억 = (
+            sum(d["volume"] * d["close"] for d in window) / len(window) / 1e8 if window else 0.0
+        )
+        today_vol = daily[0]["volume"]
+        vol_ratio = (today_vol / avg_vol) if avg_vol else 0.0
+
+        if avg_trade_value_억 < min_avg_trade_value_억:
+            continue  # 유동성 부족 — 매매가 뜸한 종목은 제외
+
         rt = None
         try:
             rt = kf.fetch_realtime(code)
@@ -184,7 +203,7 @@ def run_scan(
         above_ma = (price - ma_val) / ma_val * 100 if ma_val else 0.0
 
         if pullback >= pullback_pct:
-            rec = (name, code, mcap, price, pullback, above_ma)
+            rec = (name, code, mcap, price, pullback, above_ma, avg_trade_value_억, vol_ratio)
             (hits if uptrend else knives).append(rec)
 
     hits.sort(key=lambda x: x[4], reverse=True)
@@ -196,7 +215,7 @@ def run_scan(
 def main():
     print("=" * 74)
     print(f"  대장주 자동 발굴  [{datetime.now().strftime('%Y-%m-%d %H:%M')}]")
-    print(f"  조건: 시총상위 {TOP_N}개(≥{MIN_MCAP_억:,}억) + 200일선 위 + {LOOKBACK}일고점 대비 -{PULLBACK_PCT:.0f}%")
+    print(f"  조건: 시총상위 {TOP_N}개(≥{MIN_MCAP_억:,}억) + 200일선 위 + {LOOKBACK}일고점 대비 -{PULLBACK_PCT:.0f}% + 평균거래대금 ≥{MIN_AVG_TRADE_VALUE_억}억")
     print("=" * 74)
 
     try:
@@ -219,11 +238,11 @@ def main():
     print(f"  🟢 조건 충족 — 대형주 + 상승추세(200일선 위) + 눌림 ({len(hits)}개)")
     print("=" * 74)
     if hits:
-        print(f"  {'종목명':16} {'코드':>7} {'시총(억)':>9} {'현재가':>10} {'눌림':>7} {'200일선위':>9}")
-        print("  " + "-" * 66)
-        for name, code, mcap, price, pb, above in hits[:MAX_SHOW]:
+        print(f"  {'종목명':16} {'코드':>7} {'시총(억)':>9} {'현재가':>10} {'눌림':>7} {'200일선위':>9} {'평균거래대금':>10} {'거래량비':>7}")
+        print("  " + "-" * 90)
+        for name, code, mcap, price, pb, above, tv, vr in hits[:MAX_SHOW]:
             mc = f"{mcap:,}" if mcap else "-"
-            print(f"  {name:16} {code:>7} {mc:>9} {price:>10,} {pb:>6.1f}% {above:>7.1f}%")
+            print(f"  {name:16} {code:>7} {mc:>9} {price:>10,} {pb:>6.1f}% {above:>7.1f}% {tv:>9,.0f}억 {vr:>6.1f}x")
         print(f"\n  ※ '눌림' 클수록 고점서 많이 빠짐 / '200일선위' 클수록 추세 강함.")
         print(f"  ※ 조건 스크리닝일 뿐. 매수 여부·종목·금액은 본인 판단.")
     else:

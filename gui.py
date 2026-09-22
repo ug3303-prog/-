@@ -73,6 +73,7 @@ class ScannerApp(tk.Tk):
         self.var_lookback = tk.IntVar(value=af.LOOKBACK)
         self.var_ma = tk.IntVar(value=af.MA_PERIOD)
         self.var_max_show = tk.IntVar(value=af.MAX_SHOW)
+        self.var_min_trade_value = tk.DoubleVar(value=af.MIN_AVG_TRADE_VALUE_억)
 
         fields = [
             ("시총 상위 N개", self.var_top_n, 8),
@@ -80,6 +81,7 @@ class ScannerApp(tk.Tk):
             ("눌림 기준(%)", self.var_pullback, 8),
             ("고점 산정일", self.var_lookback, 8),
             ("이동평균일", self.var_ma, 8),
+            ("최소 평균거래대금(억)", self.var_min_trade_value, 8),
             ("결과 최대표시", self.var_max_show, 8),
         ]
         for i, (label, var, width) in enumerate(fields):
@@ -128,10 +130,11 @@ class ScannerApp(tk.Tk):
     def _make_tree(self, parent, height=10):
         frame = ttk.Frame(parent)
         frame.pack(fill="both", expand=True)
-        cols = ("name", "code", "mcap", "price", "pullback", "above_ma")
+        cols = ("name", "code", "mcap", "price", "pullback", "above_ma", "trade_value", "vol_ratio")
         headers = {
             "name": "종목명", "code": "코드", "mcap": "시총(억)",
             "price": "현재가", "pullback": "눌림(%)", "above_ma": "200일선위(%)",
+            "trade_value": "평균거래대금(억)", "vol_ratio": "거래량비(배)",
         }
         tree = ttk.Treeview(frame, columns=cols, show="headings", height=height)
         for c in cols:
@@ -191,6 +194,7 @@ class ScannerApp(tk.Tk):
             pullback_pct=self.var_pullback.get(),
             lookback=self.var_lookback.get(),
             ma_period=self.var_ma.get(),
+            min_avg_trade_value_억=self.var_min_trade_value.get(),
         )
 
         self._worker = threading.Thread(target=self._run_worker, args=(params,), daemon=True)
@@ -256,11 +260,11 @@ class ScannerApp(tk.Tk):
     def _fill_tree(self, tree, rows):
         for item in tree.get_children():
             tree.delete(item)
-        for name, code, mcap, price, pb, above in rows[: self.var_max_show.get()]:
+        for name, code, mcap, price, pb, above, tv, vr in rows[: self.var_max_show.get()]:
             mc = f"{mcap:,}" if mcap else "-"
             tree.insert(
                 "", "end",
-                values=(name, code, mc, f"{price:,}", f"{pb:.1f}", f"{above:.1f}"),
+                values=(name, code, mc, f"{price:,}", f"{pb:.1f}", f"{above:.1f}", f"{tv:,.0f}", f"{vr:.1f}"),
             )
 
     def _set_log(self, text):
@@ -287,11 +291,11 @@ class ScannerApp(tk.Tk):
             return
         with open(path, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f)
-            w.writerow(["구분", "종목명", "코드", "시총(억)", "현재가", "눌림(%)", "200일선위(%)"])
-            for name, code, mcap, price, pb, above in hits:
-                w.writerow(["충족", name, code, mcap, price, f"{pb:.2f}", f"{above:.2f}"])
-            for name, code, mcap, price, pb, above in knives:
-                w.writerow(["칼날주의", name, code, mcap, price, f"{pb:.2f}", f"{above:.2f}"])
+            w.writerow(["구분", "종목명", "코드", "시총(억)", "현재가", "눌림(%)", "200일선위(%)", "평균거래대금(억)", "거래량비(배)"])
+            for name, code, mcap, price, pb, above, tv, vr in hits:
+                w.writerow(["충족", name, code, mcap, price, f"{pb:.2f}", f"{above:.2f}", f"{tv:.1f}", f"{vr:.2f}"])
+            for name, code, mcap, price, pb, above, tv, vr in knives:
+                w.writerow(["칼날주의", name, code, mcap, price, f"{pb:.2f}", f"{above:.2f}", f"{tv:.1f}", f"{vr:.2f}"])
         messagebox.showinfo("저장 완료", f"저장됨: {path}")
 
 
