@@ -217,8 +217,24 @@ def _get(path: str, tr_id: str, params: dict, retries: int = 3):
     return None
 
 
+def _f(v, default=None):
+    """문자열/숫자를 실수(float)로 안전 변환."""
+    if v is None:
+        return default
+    s = str(v).strip().replace(",", "")
+    if s in ("", "-", "None"):
+        return default
+    try:
+        return float(s)
+    except Exception:
+        return default
+
+
 def fetch_realtime(code6: str):
-    """현재가 조회. 반환: {"price": int} 또는 None"""
+    """
+    현재가 조회. 같은 API 응답에 PER/PBR도 같이 오므로 추가 호출 없이 반환.
+    반환: {"price": int, "per": float|None, "pbr": float|None} 또는 None
+    """
     j = _get(
         "/uapi/domestic-stock/v1/quotations/inquire-price",
         tr_id="FHKST01010100",
@@ -228,4 +244,8 @@ def fetch_realtime(code6: str):
     price = _i(out.get("stck_prpr"))
     if price is None:
         return None
-    return {"price": price}
+    return {
+        "price": price,
+        "per": _f(out.get("per")),
+        "pbr": _f(out.get("pbr")),
+    }

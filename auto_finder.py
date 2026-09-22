@@ -29,6 +29,8 @@ LOOKBACK     = 20       # 고점 산정 거래일
 MA_PERIOD    = 200      # 추세 판단 이동평균 (현재가 > 200일선 = 상승추세)
 MAX_SHOW     = 25       # 결과 최대 표시 개수
 MIN_AVG_TRADE_VALUE_억 = 30   # 최소 평균거래대금(억원). LOOKBACK일 평균, 유동성 없는 종목 제외
+MAX_PER      = 0        # PER 상한 (0 = 필터 안 함). 적자 등 PER 없는 종목은 필터 대상에서 제외하지 않음
+MAX_PBR      = 0        # PBR 상한 (0 = 필터 안 함)
 
 
 def _fetch_history(code6: str, min_rows: int = 210):
@@ -122,6 +124,8 @@ def run_scan(
     lookback: int = LOOKBACK,
     ma_period: int = MA_PERIOD,
     min_avg_trade_value_억: float = MIN_AVG_TRADE_VALUE_억,
+    max_per: float = MAX_PER,
+    max_pbr: float = MAX_PBR,
     progress_cb=None,
     stop_flag=None,
     log_cb=None,
@@ -136,9 +140,15 @@ def run_scan(
     거래대금(유동성) 조건: 최근 lookback일 평균거래대금이 min_avg_trade_value_억
     미만이면 제외한다. 매매가 뜸한 종목(허수 눌림)을 걸러내기 위함.
 
+    밸류에이션 조건: max_per / max_pbr 을 0보다 크게 주면 그 값을 초과하는
+    종목을 제외한다(둘 다 0이면 필터 안 함). PER/PBR이 없는 종목(적자 등)은
+    필터로 거르지 않고 통과시킨 뒤 결과에 None으로 표시한다 — 필터링해도
+    적자라서가 아니라 '값이 없어서' 빠지는 걸 방지하기 위함.
+
     hits / knives 원소:
-      (name, code, mcap억, price, pullback%, above_ma%, avg_trade_value억, vol_ratio)
+      (name, code, mcap억, price, pullback%, above_ma%, avg_trade_value억, vol_ratio, per, pbr)
       vol_ratio = 최근 거래일 거래량 / lookback일 평균거래량 (1.0 = 평균과 동일)
+      per / pbr 은 float 또는 None(데이터 없음)
     """
     def log(msg):
         if log_cb:
@@ -197,13 +207,20 @@ def run_scan(
         except Exception:
             pass
         price = (rt or {}).get("price") or daily[0]["close"]
+        per = (rt or {}).get("per")
+        pbr = (rt or {}).get("pbr")
+
+        if max_per and per is not None and per > max_per:
+            continue
+        if max_pbr and pbr is not None and pbr > max_pbr:
+            continue
 
         pullback = (high_n - price) / high_n * 100 if high_n else 0.0
         uptrend = price > ma_val
         above_ma = (price - ma_val) / ma_val * 100 if ma_val else 0.0
 
         if pullback >= pullback_pct:
-            rec = (name, code, mcap, price, pullback, above_ma, avg_trade_value_억, vol_ratio)
+            rec = (name, code, mcap, price, pullback, above_ma, avg_trade_value_억, vol_ratio, per, pbr)
             (hits if uptrend else knives).append(rec)
 
     hits.sort(key=lambda x: x[4], reverse=True)
@@ -238,11 +255,13 @@ def main():
     print(f"  🟢 조건 충족 — 대형주 + 상승추세(200일선 위) + 눌림 ({len(hits)}개)")
     print("=" * 74)
     if hits:
-        print(f"  {'종목명':16} {'코드':>7} {'시총(억)':>9} {'현재가':>10} {'눌림':>7} {'200일선위':>9} {'평균거래대금':>10} {'거래량비':>7}")
-        print("  " + "-" * 90)
-        for name, code, mcap, price, pb, above, tv, vr in hits[:MAX_SHOW]:
+        print(f"  {'종목명':16} {'코드':>7} {'시총(억)':>9} {'현재가':>10} {'눌림':>7} {'200일선위':>9} {'평균거래대금':>10} {'거래량비':>7} {'PER':>7} {'PBR':>6}")
+        print("  " + "-" * 108)
+        for name, code, mcap, price, pb, above, tv, vr, per, pbr in hits[:MAX_SHOW]:
             mc = f"{mcap:,}" if mcap else "-"
-            print(f"  {name:16} {code:>7} {mc:>9} {price:>10,} {pb:>6.1f}% {above:>7.1f}% {tv:>9,.0f}억 {vr:>6.1f}x")
+            per_s = f"{per:.1f}" if per is not None else "-"
+            pbr_s = f"{pbr:.2f}" if pbr is not None else "-"
+            print(f"  {name:16} {code:>7} {mc:>9} {price:>10,} {pb:>6.1f}% {above:>7.1f}% {tv:>9,.0f}억 {vr:>6.1f}x {per_s:>7} {pbr_s:>6}")
         print(f"\n  ※ '눌림' 클수록 고점서 많이 빠짐 / '200일선위' 클수록 추세 강함.")
         print(f"  ※ 조건 스크리닝일 뿐. 매수 여부·종목·금액은 본인 판단.")
     else:
