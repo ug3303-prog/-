@@ -95,6 +95,22 @@ def load_top_marcap(top_n: int, min_mcap_억: int, log_cb=None):
     mcap_col = cols.get("marcap") or cols.get("markcap") or cols.get("marketcap")
     if not code_col or not name_col:
         raise RuntimeError(f"컬럼 확인 필요: {list(df.columns)}")
+
+    # fdr.StockListing('KRX-MARCAP')은 기본적으로 GitHub에 캐시된 스냅샷 CSV를 쓰는데,
+    # 이 캐시가 당일 데이터를 아직 못 채운 경우 Close/Marcap이 전부 비어 있는 채로 온다.
+    # 이럴 땐 KRX 서버에 직접 실시간으로 물어보는 대체 클래스로 폴백한다.
+    if not mcap_col or df[mcap_col].notna().mean() < 0.5:
+        log("[참고] 캐시된 시총 데이터가 비어있어 KRX 서버에서 직접 재조회합니다...")
+        try:
+            from FinanceDataReader.krx.listing import KrxMarcapListing
+            df = KrxMarcapListing("KRX-MARCAP").read()
+            cols = {c.lower(): c for c in df.columns}
+            code_col = cols.get("code") or cols.get("symbol")
+            name_col = cols.get("name")
+            mcap_col = cols.get("marcap") or cols.get("markcap") or cols.get("marketcap")
+        except Exception as e:
+            raise RuntimeError(f"KRX 실시간 시총 조회도 실패했습니다: {e}")
+
     if not mcap_col:
         raise RuntimeError(
             f"시가총액 컬럼을 찾을 수 없습니다 (컬럼 목록: {list(df.columns)}). "
