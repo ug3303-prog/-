@@ -81,8 +81,12 @@ def _fetch_history(code6: str, min_rows: int = 210):
     return sorted(collected.values(), key=lambda x: x["date"], reverse=True)
 
 
-def load_top_marcap(top_n: int, min_mcap_억: int):
+def load_top_marcap(top_n: int, min_mcap_억: int, log_cb=None):
     """KRX 시총 상위 종목. 반환: [(code6, name, mcap억), ...]"""
+    def log(msg):
+        if log_cb:
+            log_cb(msg)
+
     import FinanceDataReader as fdr
     df = fdr.StockListing("KRX-MARCAP")
     cols = {c.lower(): c for c in df.columns}
@@ -91,14 +95,29 @@ def load_top_marcap(top_n: int, min_mcap_억: int):
     mcap_col = cols.get("marcap") or cols.get("markcap") or cols.get("marketcap")
     if not code_col or not name_col:
         raise RuntimeError(f"컬럼 확인 필요: {list(df.columns)}")
-    if mcap_col:
-        df = df.sort_values(mcap_col, ascending=False)
+    if not mcap_col:
+        raise RuntimeError(
+            f"시가총액 컬럼을 찾을 수 없습니다 (컬럼 목록: {list(df.columns)}). "
+            "FinanceDataReader 데이터 소스가 바뀌었을 수 있습니다."
+        )
+
+    # 시총 데이터가 결측(NaN/0)이면 정렬 자체가 의미 없어지고 '대형주 상위 N개'가
+    # 실제로는 무작위 종목이 되어버린다 — 조용히 넘어가지 않고 바로 알린다.
+    valid_ratio = df[mcap_col].notna().mean() if len(df) else 0
+    if valid_ratio < 0.5:
+        raise RuntimeError(
+            f"KRX 시총 데이터 결측이 심합니다(정상비율 {valid_ratio:.0%}). "
+            "FinanceDataReader/KRX 쪽 일시적 데이터 문제일 수 있으니 잠시 후 다시 시도하세요."
+        )
+
+    df = df.sort_values(mcap_col, ascending=False)
 
     out = []
+    skipped_no_mcap = 0
     for _, row in df.iterrows():
         code = str(row[code_col]).zfill(6)
         name = str(row[name_col])
-        mcap_won = row[mcap_col] if mcap_col else None
+        mcap_won = row[mcap_col]
         try:
             mcap_억 = int(mcap_won / 1e8) if mcap_won and mcap_won == mcap_won else None
         except Exception:
@@ -109,11 +128,17 @@ def load_top_marcap(top_n: int, min_mcap_억: int):
             continue
         if name.endswith("우"):   # 우선주
             continue
-        if mcap_억 is not None and mcap_억 < min_mcap_억:
+        if mcap_억 is None:
+            skipped_no_mcap += 1
+            continue  # 시총 정보 없는 종목은 '대형주' 조건을 확인할 수 없으므로 제외
+        if mcap_억 < min_mcap_억:
             continue
         out.append((code, name, mcap_억))
         if len(out) >= top_n:
             break
+
+    if skipped_no_mcap:
+        log(f"[참고] 시총 정보 없어 제외된 종목 {skipped_no_mcap}개")
     return out
 
 
@@ -159,7 +184,7 @@ def run_scan(
 
     kf._load_keys()
     log(f"KRX 시총 상위 종목 로딩 중... (상위 {top_n}개, {min_mcap_억:,}억 이상)")
-    universe = load_top_marcap(top_n, min_mcap_억)
+    universe = load_top_marcap(top_n, min_mcap_억, log_cb=log)
     log(f"대상 대형주: {len(universe)}개")
 
     hits, knives, scanned = [], [], 0
