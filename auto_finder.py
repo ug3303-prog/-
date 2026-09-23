@@ -87,6 +87,7 @@ def load_top_marcap(top_n: int, min_mcap_억: int, log_cb=None):
         if log_cb:
             log_cb(msg)
 
+    import pandas as pd
     import FinanceDataReader as fdr
     df = fdr.StockListing("KRX-MARCAP")
     cols = {c.lower(): c for c in df.columns}
@@ -98,18 +99,43 @@ def load_top_marcap(top_n: int, min_mcap_억: int, log_cb=None):
 
     # fdr.StockListing('KRX-MARCAP')은 기본적으로 GitHub에 캐시된 스냅샷 CSV를 쓰는데,
     # 이 캐시가 당일 데이터를 아직 못 채운 경우 Close/Marcap이 전부 비어 있는 채로 온다.
-    # 이럴 땐 KRX 서버에 직접 실시간으로 물어보는 대체 클래스로 폴백한다.
+    # KRX 서버 직접 조회는 방화벽/사내망 등에서 막히는 경우가 많아 불안정하므로,
+    # 대신 GitHub 캐시에서 하루씩 이전 영업일로 거슬러 올라가며 데이터가 채워진
+    # 날짜를 찾는다(전 영업일 마감 기준 시총으로도 '대형주' 판별에는 충분).
     if not mcap_col or df[mcap_col].notna().mean() < 0.5:
-        log("[참고] 캐시된 시총 데이터가 비어있어 KRX 서버에서 직접 재조회합니다...")
-        try:
-            from FinanceDataReader.krx.listing import KrxMarcapListing
-            df = KrxMarcapListing("KRX-MARCAP").read()
-            cols = {c.lower(): c for c in df.columns}
-            code_col = cols.get("code") or cols.get("symbol")
-            name_col = cols.get("name")
-            mcap_col = cols.get("marcap") or cols.get("markcap") or cols.get("marketcap")
-        except Exception as e:
-            raise RuntimeError(f"KRX 실시간 시총 조회도 실패했습니다: {e}")
+        found = False
+        d = datetime.now() - timedelta(days=1)
+        for _ in range(10):
+            date_str = d.strftime("%Y-%m-%d")
+            try:
+                candidate = pd.read_csv(
+                    f"https://raw.githubusercontent.com/FinanceData/fdr_krx_data_cache/"
+                    f"refs/heads/master/data/listing/krx/{date_str}.csv",
+                    index_col=0,
+                    dtype={"Code": str, "Dept": str, "ChangeCode": str, "MarketId": str},
+                ).reset_index(drop=True)
+            except Exception:
+                d -= timedelta(days=1)
+                continue
+
+            c_cols = {c.lower(): c for c in candidate.columns}
+            c_mcap_col = c_cols.get("marcap") or c_cols.get("markcap") or c_cols.get("marketcap")
+            if c_mcap_col and candidate[c_mcap_col].notna().mean() >= 0.5:
+                df = candidate
+                cols = c_cols
+                code_col = cols.get("code") or cols.get("symbol")
+                name_col = cols.get("name")
+                mcap_col = c_mcap_col
+                log(f"[참고] 당일 시총 데이터가 비어있어 {date_str}(전 영업일) 마감 기준으로 대체합니다.")
+                found = True
+                break
+            d -= timedelta(days=1)
+
+        if not found:
+            raise RuntimeError(
+                "최근 10일 내 시총 데이터를 찾지 못했습니다. "
+                "FinanceDataReader/KRX 쪽 문제일 수 있으니 잠시 후 다시 시도하세요."
+            )
 
     if not mcap_col:
         raise RuntimeError(
