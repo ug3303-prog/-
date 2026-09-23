@@ -100,11 +100,13 @@ def _read_key_file():
 
 
 def _load_token_cache():
+    """캐시된 토큰이 유효하면 (access_token, expire) 튜플을, 아니면 None을 반환."""
     if _TOKEN_FILE.exists():
         try:
             data = json.loads(_TOKEN_FILE.read_text(encoding="utf-8"))
-            if data.get("app_key") == _state["app_key"] and data.get("expire", 0) > time.time() + 30:
-                return data.get("access_token")
+            expire = data.get("expire", 0)
+            if data.get("app_key") == _state["app_key"] and expire > time.time() + 30:
+                return data.get("access_token"), expire
         except Exception:
             pass
     return None
@@ -127,22 +129,58 @@ def _save_token_cache():
         pass
 
 
+_AUTH_FAIL_COOLDOWN = 60  # 토큰 발급 실패 시 이 시간(초) 동안은 재요청 없이 바로 에러
+_auth_fail = {"until": 0.0, "message": ""}
+
+
 def _issue_token():
+    # 최근에 발급이 실패했으면 쿨다운 동안은 서버에 다시 요청하지 않고 바로 실패
+    # (실패한 채로 계속 재요청하면 레이트리밋에 더 걸리거나 일시 차단될 수 있음)
+    now = time.time()
+    if now < _auth_fail["until"]:
+        wait = int(_auth_fail["until"] - now)
+        raise RuntimeError(
+            f"{_auth_fail['message']} (최근 발급 실패로 {wait}초간 재시도를 쉽니다)"
+        )
+
     url = _state["base_url"] + "/oauth2/tokenP"
     payload = {
         "grant_type": "client_credentials",
         "appkey": _state["app_key"],
         "appsecret": _state["app_secret"],
     }
-    resp = requests.post(url, json=payload, timeout=10)
-    resp.raise_for_status()
+    try:
+        resp = requests.post(url, json=payload, timeout=10)
+    except requests.RequestException as e:
+        msg = f"토큰 발급 요청 실패(네트워크): {e}"
+        _auth_fail["until"] = time.time() + _AUTH_FAIL_COOLDOWN
+        _auth_fail["message"] = msg
+        raise RuntimeError(msg) from e
+
+    if resp.status_code != 200:
+        # KIS는 실패 사유를 JSON 본문(msg_cd/msg1)으로 알려주는 경우가 많아 최대한 노출한다.
+        try:
+            body = resp.json()
+            detail = body.get("msg1") or body.get("error_description") or str(body)
+        except Exception:
+            detail = resp.text[:300]
+        msg = f"토큰 발급 실패 (HTTP {resp.status_code}): {detail}"
+        _auth_fail["until"] = time.time() + _AUTH_FAIL_COOLDOWN
+        _auth_fail["message"] = msg
+        raise RuntimeError(msg)
+
     j = resp.json()
     token = j.get("access_token")
     if not token:
-        raise RuntimeError(f"토큰 발급 실패: {j}")
+        msg = f"토큰 발급 실패: {j}"
+        _auth_fail["until"] = time.time() + _AUTH_FAIL_COOLDOWN
+        _auth_fail["message"] = msg
+        raise RuntimeError(msg)
+
     expires_in = _i(j.get("expires_in"), 86400)
     _state["access_token"] = token
     _state["token_expire"] = time.time() + expires_in
+    _auth_fail["until"] = 0.0
     _save_token_cache()
     return token
 
@@ -169,7 +207,7 @@ def _load_keys(app_key: str | None = None, app_secret: str | None = None, is_vir
 
     cached = _load_token_cache()
     if cached:
-        _state["access_token"] = cached
+        _state["access_token"], _state["token_expire"] = cached
         return
 
     _throttle()
