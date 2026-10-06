@@ -41,7 +41,8 @@ _state = {
 
 _lock = threading.Lock()
 _last_call = {"t": 0.0}
-_MIN_INTERVAL = 0.06  # 초당 약 15~16회로 제한 (KIS 레이트리밋 여유있게)
+_MIN_INTERVAL_REAL = 0.06      # 실전투자: 초당 약 15~16회 (KIS 레이트리밋 여유있게)
+_MIN_INTERVAL_VIRTUAL = 0.55   # 모의투자: 실전보다 훨씬 엄격(초당 ~2회 수준) — 여유있게 1.8회/초
 
 
 def _i(v, default=None):
@@ -64,8 +65,9 @@ def _i(v, default=None):
 
 def _throttle():
     with _lock:
+        min_interval = _MIN_INTERVAL_VIRTUAL if _state["is_virtual"] else _MIN_INTERVAL_REAL
         now = time.time()
-        wait = _MIN_INTERVAL - (now - _last_call["t"])
+        wait = min_interval - (now - _last_call["t"])
         if wait > 0:
             time.sleep(wait)
         _last_call["t"] = time.time()
@@ -242,7 +244,15 @@ def _get(path: str, tr_id: str, params: dict, retries: int = 3):
         try:
             resp = requests.get(url, headers=headers, params=params, timeout=10)
             if resp.status_code == 200:
-                return resp.json()
+                body = resp.json()
+                # KIS는 실패해도 HTTP 200을 주고 본문의 rt_cd로 성패를 알리는 경우가 흔하다.
+                # 이걸 무시하면 실패가 "데이터 없음"으로 조용히 묻혀 원인 파악이 안 된다.
+                rt_cd = body.get("rt_cd")
+                if rt_cd is not None and rt_cd != "0":
+                    raise RuntimeError(
+                        f"KIS API 오류(tr_id={tr_id}, rt_cd={rt_cd}): {body.get('msg1', '')}"
+                    )
+                return body
             if resp.status_code in (429, 500, 502, 503):
                 time.sleep(0.5 * (attempt + 1))
                 continue

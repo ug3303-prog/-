@@ -19,7 +19,8 @@ auto_finder.py — 대장주 자동 발굴기
 from __future__ import annotations
 from datetime import datetime, timedelta
 
-import kis_feed as kf   # _get, _throttle, _i, fetch_realtime, _load_keys 재사용
+import kis_feed as kf      # _get, _throttle, _i, fetch_realtime, _load_keys 재사용
+import dart_feed as dart   # DART 전자공시 — 부채비율/영업이익 등 재무 펀더멘털
 
 # ── 발굴 조건 기본값 (GUI/run_scan 에서 override 가능) ──────────────
 TOP_N        = 80       # 시총 상위 몇 개를 훑을지 (많을수록 느림)
@@ -31,9 +32,12 @@ MAX_SHOW     = 25       # 결과 최대 표시 개수
 MIN_AVG_TRADE_VALUE_억 = 30   # 최소 평균거래대금(억원). LOOKBACK일 평균, 유동성 없는 종목 제외
 MAX_PER      = 0        # PER 상한 (0 = 필터 안 함). 적자 등 PER 없는 종목은 필터 대상에서 제외하지 않음
 MAX_PBR      = 0        # PBR 상한 (0 = 필터 안 함)
+MAX_DEBT_RATIO    = 0   # DART 부채비율(%) 상한 (0 = 필터 안 함)
+REQUIRE_OP_PROFIT = False  # True면 최근 영업이익 적자 종목 제외
+USE_DART          = False # True면 종목마다 DART 재무정보를 추가 조회(스캔이 느려짐)
 
 
-def _fetch_history(code6: str, min_rows: int = 210):
+def _fetch_history(code6: str, min_rows: int = 210, lookback: int = LOOKBACK):
     """
     200일선 계산용 장기 일봉. KIS 일봉은 1회 ~100개라 날짜창을 뒤로 밀며 모은다.
     반환: 최신순 [{date, high, low, close, volume}, ...]  (실패 시 None)
@@ -76,7 +80,7 @@ def _fetch_history(code6: str, min_rows: int = 210):
         end = datetime.strptime(min(dates), "%Y%m%d") - timedelta(days=1)
         kf._throttle()
 
-    if len(collected) < LOOKBACK:
+    if len(collected) < lookback:
         return None
     return sorted(collected.values(), key=lambda x: x["date"], reverse=True)
 
@@ -193,6 +197,9 @@ def run_scan(
     min_avg_trade_value_억: float = MIN_AVG_TRADE_VALUE_억,
     max_per: float = MAX_PER,
     max_pbr: float = MAX_PBR,
+    use_dart: bool = USE_DART,
+    max_debt_ratio: float = MAX_DEBT_RATIO,
+    require_op_profit: bool = REQUIRE_OP_PROFIT,
     progress_cb=None,
     stop_flag=None,
     log_cb=None,
@@ -212,19 +219,29 @@ def run_scan(
     필터로 거르지 않고 통과시킨 뒤 결과에 None으로 표시한다 — 필터링해도
     적자라서가 아니라 '값이 없어서' 빠지는 걸 방지하기 위함.
 
+    DART 재무 조건(use_dart=True일 때만 조회 — 종목당 API 호출이 늘어 느려짐):
+    max_debt_ratio(0=필터 안 함) 초과, 또는 require_op_profit=True인데 최근
+    영업이익이 적자면 제외한다. 역시 데이터 자체가 없는 종목은 필터링하지
+    않고 통과시킨다(공시 미비 때문에 빠지는 걸 방지).
+
     hits / knives 원소:
-      (name, code, mcap억, price, pullback%, above_ma%, avg_trade_value억, vol_ratio, per, pbr)
+      (name, code, mcap억, price, pullback%, above_ma%, avg_trade_value억, vol_ratio,
+       per, pbr, debt_ratio, op_profit_yoy, revenue_yoy, op_profit_positive)
       vol_ratio = 최근 거래일 거래량 / lookback일 평균거래량 (1.0 = 평균과 동일)
-      per / pbr 은 float 또는 None(데이터 없음)
+      per/pbr/debt_ratio/op_profit_yoy/revenue_yoy/op_profit_positive 는
+      float·bool 또는 None(데이터 없음). use_dart=False면 뒤 4개는 항상 None.
     """
     def log(msg):
         if log_cb:
             log_cb(msg)
 
-    global LOOKBACK
-    LOOKBACK = lookback  # _fetch_history 가 참조
-
     kf._load_keys()
+    if use_dart:
+        try:
+            dart._load_key()
+        except Exception as e:
+            log(f"[DART] 키 설정 문제로 재무 조건을 건너뜁니다: {e}")
+            use_dart = False
     log(f"KRX 시총 상위 종목 로딩 중... (상위 {top_n}개, {min_mcap_억:,}억 이상)")
     universe = load_top_marcap(top_n, min_mcap_억, log_cb=log)
     log(f"대상 대형주: {len(universe)}개")
@@ -239,7 +256,7 @@ def run_scan(
 
         daily = None
         try:
-            daily = _fetch_history(code, ma_period + 10)
+            daily = _fetch_history(code, ma_period + 10, lookback=lookback)
         except Exception as e:
             log(f"  [경고] {name}({code}) 시세 조회 실패: {e}")
 
@@ -286,9 +303,30 @@ def run_scan(
         uptrend = price > ma_val
         above_ma = (price - ma_val) / ma_val * 100 if ma_val else 0.0
 
-        if pullback >= pullback_pct:
-            rec = (name, code, mcap, price, pullback, above_ma, avg_trade_value_억, vol_ratio, per, pbr)
-            (hits if uptrend else knives).append(rec)
+        if pullback < pullback_pct:
+            continue
+
+        debt_ratio = op_profit_yoy = revenue_yoy = op_profit_positive = None
+        if use_dart:
+            try:
+                fin = dart.fetch_financials(code, log_cb=log)
+            except Exception as e:
+                fin = None
+                log(f"  [DART 경고] {name}({code}) 재무조회 실패: {e}")
+            if fin:
+                debt_ratio = fin.get("debt_ratio")
+                op_profit_yoy = fin.get("op_profit_yoy")
+                revenue_yoy = fin.get("revenue_yoy")
+                op_profit_positive = fin.get("op_profit_positive")
+
+            if max_debt_ratio and debt_ratio is not None and debt_ratio > max_debt_ratio:
+                continue
+            if require_op_profit and op_profit_positive is False:
+                continue
+
+        rec = (name, code, mcap, price, pullback, above_ma, avg_trade_value_억, vol_ratio,
+               per, pbr, debt_ratio, op_profit_yoy, revenue_yoy, op_profit_positive)
+        (hits if uptrend else knives).append(rec)
 
     hits.sort(key=lambda x: x[4], reverse=True)
     knives.sort(key=lambda x: x[4], reverse=True)
@@ -324,7 +362,7 @@ def main():
     if hits:
         print(f"  {'종목명':16} {'코드':>7} {'시총(억)':>9} {'현재가':>10} {'눌림':>7} {'200일선위':>9} {'평균거래대금':>10} {'거래량비':>7} {'PER':>7} {'PBR':>6}")
         print("  " + "-" * 108)
-        for name, code, mcap, price, pb, above, tv, vr, per, pbr in hits[:MAX_SHOW]:
+        for name, code, mcap, price, pb, above, tv, vr, per, pbr, *_dart in hits[:MAX_SHOW]:
             mc = f"{mcap:,}" if mcap else "-"
             per_s = f"{per:.1f}" if per is not None else "-"
             pbr_s = f"{pbr:.2f}" if pbr is not None else "-"

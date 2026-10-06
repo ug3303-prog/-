@@ -17,6 +17,7 @@ from tkinter import ttk, messagebox, filedialog
 import csv
 
 import kis_feed as kf
+import dart_feed as dart
 import auto_finder as af
 
 
@@ -63,6 +64,19 @@ class ScannerApp(tk.Tk):
             row=0, column=5, sticky="w", **pad
         )
 
+        ttk.Label(key_frame, text="DART API KEY").grid(row=1, column=0, sticky="e", **pad)
+        self.var_dart_key = tk.StringVar()
+        ttk.Entry(key_frame, textvariable=self.var_dart_key, width=42, show="•").grid(
+            row=1, column=1, sticky="w", **pad
+        )
+        self.var_use_dart = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            key_frame, text="DART 재무정보 사용 (느려짐)", variable=self.var_use_dart
+        ).grid(row=1, column=2, columnspan=2, sticky="w", **pad)
+        ttk.Button(key_frame, text="DART 키 저장", command=self._save_dart_key).grid(
+            row=1, column=5, sticky="w", **pad
+        )
+
         # 조건 설정
         cond_frame = ttk.LabelFrame(self, text="발굴 조건")
         cond_frame.pack(fill="x", **pad)
@@ -101,6 +115,18 @@ class ScannerApp(tk.Tk):
             ttk.Entry(cond_frame, textvariable=var, width=width).grid(
                 row=1, column=i * 2 + 1, sticky="w", **pad
             )
+
+        self.var_max_debt_ratio = tk.DoubleVar(value=af.MAX_DEBT_RATIO)
+        self.var_require_op_profit = tk.BooleanVar(value=af.REQUIRE_OP_PROFIT)
+        ttk.Label(cond_frame, text="[DART] 부채비율 상한%(0=미사용)").grid(
+            row=2, column=0, sticky="e", **pad
+        )
+        ttk.Entry(cond_frame, textvariable=self.var_max_debt_ratio, width=8).grid(
+            row=2, column=1, sticky="w", **pad
+        )
+        ttk.Checkbutton(
+            cond_frame, text="[DART] 영업이익 흑자 종목만", variable=self.var_require_op_profit
+        ).grid(row=2, column=2, columnspan=2, sticky="w", **pad)
 
         # 실행 버튼 + 진행바
         run_frame = ttk.Frame(self)
@@ -142,12 +168,15 @@ class ScannerApp(tk.Tk):
     def _make_tree(self, parent, height=10):
         frame = ttk.Frame(parent)
         frame.pack(fill="both", expand=True)
-        cols = ("name", "code", "mcap", "price", "pullback", "above_ma", "trade_value", "vol_ratio", "per", "pbr")
+        cols = ("name", "code", "mcap", "price", "pullback", "above_ma", "trade_value", "vol_ratio",
+                "per", "pbr", "debt_ratio", "op_yoy", "rev_yoy", "op_positive")
         headers = {
             "name": "종목명", "code": "코드", "mcap": "시총(억)",
             "price": "현재가", "pullback": "눌림(%)", "above_ma": "200일선위(%)",
             "trade_value": "평균거래대금(억)", "vol_ratio": "거래량비(배)",
             "per": "PER", "pbr": "PBR",
+            "debt_ratio": "부채비율(%)", "op_yoy": "영업이익YoY(%)",
+            "rev_yoy": "매출YoY(%)", "op_positive": "영업흑자",
         }
         tree = ttk.Treeview(frame, columns=cols, show="headings", height=height)
         for c in cols:
@@ -167,6 +196,9 @@ class ScannerApp(tk.Tk):
             self.var_app_key.set(cfg.get("app_key", ""))
             self.var_app_secret.set(cfg.get("app_secret", ""))
             self.var_virtual.set(bool(cfg.get("is_virtual", False)))
+        dart_cfg = dart._read_key_file()
+        if dart_cfg:
+            self.var_dart_key.set(dart_cfg.get("api_key", ""))
 
     def _save_keys(self):
         app_key = self.var_app_key.get().strip()
@@ -176,6 +208,14 @@ class ScannerApp(tk.Tk):
             return
         kf.set_keys(app_key, app_secret, self.var_virtual.get(), save=True)
         messagebox.showinfo("저장 완료", "kis_keys.json 에 저장했습니다.")
+
+    def _save_dart_key(self):
+        api_key = self.var_dart_key.get().strip()
+        if not api_key:
+            messagebox.showwarning("입력 필요", "DART API KEY를 입력하세요.")
+            return
+        dart.set_key(api_key, save=True)
+        messagebox.showinfo("저장 완료", "dart_key.json 에 저장했습니다.")
 
     # ── 스캔 실행 ────────────────────────────────────────────
     def _start_scan(self):
@@ -188,6 +228,14 @@ class ScannerApp(tk.Tk):
             messagebox.showwarning("입력 필요", "APP KEY / APP SECRET 을 입력하세요.")
             return
         kf.set_keys(app_key, app_secret, self.var_virtual.get())
+
+        use_dart = self.var_use_dart.get()
+        if use_dart:
+            dart_key = self.var_dart_key.get().strip()
+            if not dart_key:
+                messagebox.showwarning("입력 필요", "DART 재무정보를 쓰려면 DART API KEY를 입력하세요.")
+                return
+            dart.set_key(dart_key)
 
         for tree in (self.tree_hits, self.tree_knives):
             for item in tree.get_children():
@@ -210,6 +258,9 @@ class ScannerApp(tk.Tk):
             min_avg_trade_value_억=self.var_min_trade_value.get(),
             max_per=self.var_max_per.get(),
             max_pbr=self.var_max_pbr.get(),
+            use_dart=use_dart,
+            max_debt_ratio=self.var_max_debt_ratio.get(),
+            require_op_profit=self.var_require_op_profit.get(),
         )
 
         self._worker = threading.Thread(target=self._run_worker, args=(params,), daemon=True)
@@ -275,13 +326,19 @@ class ScannerApp(tk.Tk):
     def _fill_tree(self, tree, rows):
         for item in tree.get_children():
             tree.delete(item)
-        for name, code, mcap, price, pb, above, tv, vr, per, pbr in rows[: self.var_max_show.get()]:
+        for name, code, mcap, price, pb, above, tv, vr, per, pbr, debt_ratio, op_yoy, rev_yoy, op_pos \
+                in rows[: self.var_max_show.get()]:
             mc = f"{mcap:,}" if mcap else "-"
             per_s = f"{per:.1f}" if per is not None else "-"
             pbr_s = f"{pbr:.2f}" if pbr is not None else "-"
+            debt_s = f"{debt_ratio:.0f}" if debt_ratio is not None else "-"
+            op_yoy_s = f"{op_yoy:+.1f}" if op_yoy is not None else "-"
+            rev_yoy_s = f"{rev_yoy:+.1f}" if rev_yoy is not None else "-"
+            op_pos_s = {"True": "흑자", "False": "적자"}.get(str(op_pos), "-")
             tree.insert(
                 "", "end",
-                values=(name, code, mc, f"{price:,}", f"{pb:.1f}", f"{above:.1f}", f"{tv:,.0f}", f"{vr:.1f}", per_s, pbr_s),
+                values=(name, code, mc, f"{price:,}", f"{pb:.1f}", f"{above:.1f}", f"{tv:,.0f}", f"{vr:.1f}",
+                        per_s, pbr_s, debt_s, op_yoy_s, rev_yoy_s, op_pos_s),
             )
 
     def _set_log(self, text):
@@ -308,13 +365,25 @@ class ScannerApp(tk.Tk):
             return
         with open(path, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f)
-            w.writerow(["구분", "종목명", "코드", "시총(억)", "현재가", "눌림(%)", "200일선위(%)", "평균거래대금(억)", "거래량비(배)", "PER", "PBR"])
-            for name, code, mcap, price, pb, above, tv, vr, per, pbr in hits:
-                w.writerow(["충족", name, code, mcap, price, f"{pb:.2f}", f"{above:.2f}", f"{tv:.1f}", f"{vr:.2f}",
-                            (f"{per:.2f}" if per is not None else ""), (f"{pbr:.2f}" if pbr is not None else "")])
-            for name, code, mcap, price, pb, above, tv, vr, per, pbr in knives:
-                w.writerow(["칼날주의", name, code, mcap, price, f"{pb:.2f}", f"{above:.2f}", f"{tv:.1f}", f"{vr:.2f}",
-                            (f"{per:.2f}" if per is not None else ""), (f"{pbr:.2f}" if pbr is not None else "")])
+            w.writerow(["구분", "종목명", "코드", "시총(억)", "현재가", "눌림(%)", "200일선위(%)", "평균거래대금(억)",
+                        "거래량비(배)", "PER", "PBR", "부채비율(%)", "영업이익YoY(%)", "매출YoY(%)", "영업흑자"])
+
+            def _row(label, rec):
+                name, code, mcap, price, pb, above, tv, vr, per, pbr, debt_ratio, op_yoy, rev_yoy, op_pos = rec
+                op_pos_s = {"True": "흑자", "False": "적자"}.get(str(op_pos), "")
+                w.writerow([
+                    label, name, code, mcap, price, f"{pb:.2f}", f"{above:.2f}", f"{tv:.1f}", f"{vr:.2f}",
+                    (f"{per:.2f}" if per is not None else ""), (f"{pbr:.2f}" if pbr is not None else ""),
+                    (f"{debt_ratio:.1f}" if debt_ratio is not None else ""),
+                    (f"{op_yoy:.1f}" if op_yoy is not None else ""),
+                    (f"{rev_yoy:.1f}" if rev_yoy is not None else ""),
+                    op_pos_s,
+                ])
+
+            for rec in hits:
+                _row("충족", rec)
+            for rec in knives:
+                _row("칼날주의", rec)
         messagebox.showinfo("저장 완료", f"저장됨: {path}")
 
 
