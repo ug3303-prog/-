@@ -36,6 +36,12 @@ CTTR_HIGH = 150.0             # 체결강도 100 = 매수/매도 균형. 150 이
 CTTR_LOW = 70.0                # 70 이하면 매도 쏠림
 SURGE_PCT = 1.0                # 폴링 간격 사이 가격이 이 비율(%) 이상 움직이면 급등/급락 알림
 VOLUME_SURGE_RATIO = 3.0       # 직전 폴링 대비 거래량 증가분이 이 배수 넘으면 거래량 급증 알림
+VOLUME_SURGE_MIN_VALUE = 100_000_000  # 단, 증가분 거래대금(증가량×현재가)이 1억원 이상일 때만
+                                      # (실사용에서 94주 같은 미미한 체결에도 '급증'이 떠서 추가)
+
+# 상태형 신호: 조건이 유지되는 동안 매 폴링 계속 참이 되는 신호. 로그엔 새로 생기거나
+# 바뀔 때(예: 매수우위→매도우위)만 남긴다. 급등/급락/거래량 급증 같은 순간 이벤트는 매번 기록.
+_STATE_SIGNAL_PREFIXES = ("체결강도", "호가")
 
 
 def _load_stock_names():
@@ -60,6 +66,7 @@ class Watcher:
         self.last_volume = None
         self.last_update = None
         self._prev_delta = None
+        self._active_states: set[str] = set()   # 직전 폴링에 켜져 있던 상태형 신호 종류
 
     def update(self, rt: dict, ob: dict | None):
         signals = []
@@ -75,8 +82,10 @@ class Watcher:
 
         if self.last_volume is not None and volume is not None:
             delta = volume - self.last_volume
-            if self._prev_delta and delta > self._prev_delta * VOLUME_SURGE_RATIO:
-                signals.append(f"거래량 급증({delta:,}주)")
+            delta_value = delta * price if price else 0
+            if (self._prev_delta and delta > self._prev_delta * VOLUME_SURGE_RATIO
+                    and delta_value >= VOLUME_SURGE_MIN_VALUE):
+                signals.append(f"거래량 급증({delta:,}주·{delta_value / 1e8:.1f}억)")
             self._prev_delta = delta
 
         cttr = rt.get("cttr")
@@ -97,6 +106,21 @@ class Watcher:
         self.last_volume = volume
         self.last_update = time.time()
         return signals
+
+    def signals_to_log(self, signals):
+        """로그에 남길 신호만 고른다. 상태형(체결강도/호가)은 새로 생기거나 바뀔 때만,
+        이벤트형(급등/급락/거래량 급증)은 매번. 표의 신호 칸은 이와 무관하게 매번 갱신된다."""
+        out, states = [], set()
+        for sig in signals:
+            if sig.startswith(_STATE_SIGNAL_PREFIXES):
+                kind = sig.split("(")[0]          # 예: '호가 매수우위(2.8배)' → '호가 매수우위'
+                states.add(kind)
+                if kind not in self._active_states:
+                    out.append(sig)
+            else:
+                out.append(sig)
+        self._active_states = states
+        return out
 
 
 class ScalperApp(tk.Tk):
@@ -311,7 +335,7 @@ class ScalperApp(tk.Tk):
                     rt["cttr"] = None
                 signals = watcher.update(rt, ob)
                 self._msg_queue.put(("row", code, rt, ob, signals))
-                for s in signals:
+                for s in watcher.signals_to_log(signals):
                     self._msg_queue.put(("log", f"[{watcher.name or code}] {s}"))
 
             elapsed = time.time() - t0

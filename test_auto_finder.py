@@ -380,6 +380,56 @@ class ScalperFeedTests(unittest.TestCase):
             self.assertIsNone(kf.fetch_orderbook("005930"))
 
 
+def _import_scalper():
+    """tkinter가 없는 환경(CI 등)에서도 Watcher 로직만 테스트할 수 있게 더미 모듈을 끼운다."""
+    import sys
+    import types
+    try:
+        import tkinter  # noqa: F401
+    except ImportError:
+        for m in ("tkinter", "tkinter.ttk", "tkinter.messagebox"):
+            sys.modules.setdefault(m, types.ModuleType(m))
+        sys.modules["tkinter"].Tk = object
+    import scalper
+    return scalper
+
+
+class ScalperSignalTests(unittest.TestCase):
+    def setUp(self):
+        self.sc = _import_scalper()
+        self.w = self.sc.Watcher("021240", "코웨이")
+
+    def step(self, price, volume, cttr=100, ratio=1.0):
+        sig = self.w.update({"price": price, "volume": volume, "cttr": cttr}, {"bid_ask_ratio": ratio})
+        return sig, self.w.signals_to_log(sig)
+
+    def test_tiny_volume_jump_is_not_surge(self):
+        # 실사용에서 본 '거래량 급증(94주)' — 배수 조건은 넘지만 거래대금 1억 미만이면 무시
+        self.step(102_000, 1_000)
+        self.step(102_000, 1_020)            # +20주
+        sig, _ = self.step(102_000, 1_114)   # +94주 ≈ 959만원
+        self.assertEqual([], sig)
+
+    def test_large_volume_jump_is_surge(self):
+        self.step(102_000, 1_000)
+        self.step(102_000, 1_020)
+        sig, logged = self.step(102_000, 3_020)   # +2,000주 ≈ 2.04억
+        self.assertTrue(any(x.startswith("거래량 급증") for x in sig))
+        self.assertEqual(sig, logged)             # 이벤트형은 매번 로그
+
+    def test_state_signal_logged_only_on_change(self):
+        _, logged = self.step(102_000, 1_000, ratio=2.8)
+        self.assertEqual(["호가 매수우위(2.8배)"], logged)
+        sig, logged = self.step(102_000, 1_000, ratio=2.9)
+        self.assertEqual(["호가 매수우위(2.9배)"], sig)   # 표에는 계속 표시
+        self.assertEqual([], logged)                       # 로그엔 반복 안 함
+        _, logged = self.step(102_000, 1_000, ratio=0.5)
+        self.assertEqual(["호가 매도우위(2.0배)"], logged)  # 방향이 바뀌면 다시 로그
+        self.step(102_000, 1_000, ratio=1.0)                # 해제
+        _, logged = self.step(102_000, 1_000, ratio=2.0)
+        self.assertEqual(["호가 매수우위(2.0배)"], logged)  # 해제 후 재발생도 로그
+
+
 class FormatTests(unittest.TestCase):
     def test_yoy_format(self):
         self.assertEqual("N/M", af.fmt_yoy(8118.0))
