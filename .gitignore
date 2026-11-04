@@ -1,4 +1,7 @@
 kis_keys.json
 .kis_token_cache.json
+dart_key.json
+.dart_corpcode_cache.json
+.dart_financials_cache.json
 __pycache__/
 *.pyc
