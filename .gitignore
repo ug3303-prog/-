@@ -3,5 +3,6 @@ kis_keys.json
 dart_key.json
 .dart_corpcode_cache.json
 .dart_financials_cache.json
+signal_log.csv
 __pycache__/
 *.pyc
