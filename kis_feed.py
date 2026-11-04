@@ -280,8 +280,17 @@ def _f(v, default=None):
 
 def fetch_realtime(code6: str):
     """
-    현재가 조회. 같은 API 응답에 PER/PBR도 같이 오므로 추가 호출 없이 반환.
-    반환: {"price": int, "per": float|None, "pbr": float|None} 또는 None
+    현재가 조회. 같은 API 응답에 PER/PBR/전일대비/체결강도 재료도 같이 오므로
+    추가 호출 없이 반환.
+    반환: {
+      "price": int, "per": float|None, "pbr": float|None,
+      "change": int|None,        # 전일대비(부호 있음)
+      "change_pct": float|None,  # 등락률(%)
+      "volume": int|None,        # 누적거래량
+      "buy_cntg_qty": int|None,  # 누적 매수체결량(상승체결)
+      "sell_cntg_qty": int|None, # 누적 매도체결량(하락체결)
+      "cttr": float|None,        # 체결강도(%) = 매수체결량/매도체결량*100, 100 넘으면 매수우위
+    } 또는 None
     """
     j = _get(
         "/uapi/domestic-stock/v1/quotations/inquire-price",
@@ -292,8 +301,64 @@ def fetch_realtime(code6: str):
     price = _i(out.get("stck_prpr"))
     if price is None:
         return None
+
+    buy_qty = _i(out.get("shnu_cntg_qty"))
+    sell_qty = _i(out.get("seln_cntg_qty"))
+    cttr = (buy_qty / sell_qty * 100) if (buy_qty is not None and sell_qty) else None
+
+    sign = _i(out.get("prdy_vrss_sign"), 0)  # 1,2=상승 4,5=하락 3=보합
+    change = _i(out.get("prdy_vrss"))
+    if change is not None and sign in (4, 5) and change > 0:
+        change = -change
+
     return {
         "price": price,
         "per": _f(out.get("per")),
         "pbr": _f(out.get("pbr")),
+        "change": change,
+        "change_pct": _f(out.get("prdy_ctrt")),
+        "volume": _i(out.get("acml_vol")),
+        "buy_cntg_qty": buy_qty,
+        "sell_cntg_qty": sell_qty,
+        "cttr": cttr,
+    }
+
+
+def fetch_orderbook(code6: str):
+    """
+    실시간 호가(매수/매도 1~10단계 잔량) 조회.
+    반환: {
+      "ask1": int, "bid1": int,                # 매도1호가/매수1호가
+      "total_ask_qty": int, "total_bid_qty": int,  # 총 매도/매수 잔량
+      "bid_ask_ratio": float|None,             # 총매수잔량/총매도잔량 (1보다 크면 매수우위)
+      "levels": [(ask_price, ask_qty, bid_price, bid_qty), ...]  # 1~10단계
+    } 또는 None
+    """
+    j = _get(
+        "/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn",
+        tr_id="FHKST01010200",
+        params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code6},
+    )
+    out = (j or {}).get("output1") or {}
+    if not out:
+        return None
+
+    levels = []
+    for n in range(1, 11):
+        levels.append((
+            _i(out.get(f"askp{n}")), _i(out.get(f"askp_rsqn{n}")),
+            _i(out.get(f"bidp{n}")), _i(out.get(f"bidp_rsqn{n}")),
+        ))
+
+    total_ask = _i(out.get("total_askp_rsqn"))
+    total_bid = _i(out.get("total_bidp_rsqn"))
+    ratio = (total_bid / total_ask) if total_ask else None
+
+    return {
+        "ask1": _i(out.get("askp1")),
+        "bid1": _i(out.get("bidp1")),
+        "total_ask_qty": total_ask,
+        "total_bid_qty": total_bid,
+        "bid_ask_ratio": ratio,
+        "levels": levels,
     }
