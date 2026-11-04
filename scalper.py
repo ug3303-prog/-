@@ -514,12 +514,17 @@ class ScalperApp(tk.Tk):
                     self._append_log(f"[경고] {item[1]} 조회 실패: {item[2]}")
                 elif kind == "verify_new":
                     _, code, name, price, direction, t = item
-                    self._pending_verifications.append({
+                    v = {
                         "code": code, "name": name or code, "price": price,
                         "direction": direction, "time": t, "done": set(),
-                    })
+                    }
+                    self._pending_verifications.append(v)
+                    # 발생 시점 자체를 바로 CSV에 남겨둔다 — 알림을 놓치고 앱을 꺼도
+                    # 신호가 떴던 사실(언제·어느 종목·어느 방향)은 파일에 남는다.
+                    self._log_verification_csv(v, 0, price, None, None)
                 elif kind == "alert":
                     _, name, labels = item
+                    self._append_log(f"🔥 [{name}] 복합신호 발생: " + " / ".join(labels))
                     self._notify_composite(name, labels)
                 elif kind == "error":
                     messagebox.showerror("오류", item[1])
@@ -595,6 +600,9 @@ class ScalperApp(tk.Tk):
             )
 
     def _log_verification_csv(self, v, horizon, cur_price, change_pct, hit):
+        """horizon=0 은 '신호가 떴다'는 발생 기록(결과 미정 — 적중 칸 '-'),
+        horizon>0 은 그 시점 검증 결과. 앱을 재시작해도 신호가 떴던 사실 자체는
+        이 파일에 남아서, 알림을 놓쳤어도 나중에 CSV를 열어보면 확인할 수 있다."""
         try:
             is_new = not SIGNAL_LOG_FILE.exists()
             with open(SIGNAL_LOG_FILE, "a", newline="", encoding="utf-8-sig") as f:
@@ -603,8 +611,10 @@ class ScalperApp(tk.Tk):
                     w.writerow(["시각", "종목명", "코드", "방향", "신호가", "검증시점(초)", "검증가", "변동%", "적중"])
                 w.writerow([
                     time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(v["time"])),
-                    v["name"], v["code"], v["direction"], v["price"], horizon, cur_price,
-                    f"{change_pct:.2f}", "Y" if hit else "N",
+                    v["name"], v["code"], v["direction"], v["price"], horizon,
+                    cur_price if cur_price is not None else "",
+                    f"{change_pct:.2f}" if change_pct is not None else "",
+                    ("Y" if hit else "N") if hit is not None else "-",
                 ])
         except Exception:
             pass  # 로그 파일 기록 실패는 모니터링 자체를 막을 이유가 아니다
