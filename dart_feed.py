@@ -11,6 +11,12 @@ auto_finder.py 가 재무 펀더멘털(부채비율, 영업이익 흑자여부, 
   2) 환경변수 DART_API_KEY
   3) 같은 폴더의 dart_key.json
 
+캐시 규칙:
+  - 정상 조회 결과: 7일
+  - "공시 없음(013)": 1일
+  - 네트워크/일시 오류: 캐시하지 않음 (다음 스캔에서 재시도)
+  - 키 오류·한도 초과: DartFatalError 를 던져 호출측이 한 번만 알리고 DART 조회를 중단
+
 준비물: opendart.fss.or.kr 에서 무료로 발급받은 인증키
 """
 from __future__ import annotations
@@ -32,10 +38,19 @@ _FIN_CACHE = Path(__file__).with_name(".dart_financials_cache.json")
 
 _CORPCODE_TTL = 30 * 24 * 3600     # 종목-corp_code 매핑은 한 달에 한 번이면 충분
 _FIN_TTL = 7 * 24 * 3600           # 재무제표는 분기마다만 바뀌므로 일주일 캐시
+_NODATA_TTL = 24 * 3600            # "공시 없음"은 하루만 캐시
+_CACHE_VERSION = 2                 # 지표 계산 방식이 바뀌면 올려서 예전 캐시를 무효화
 
 _state = {"api_key": None}
 _last_call = {"t": 0.0}
 _MIN_INTERVAL = 0.08
+
+# DART status: 010 미등록 키 / 011 사용불가 키 / 012 접근불가 IP / 020 요청 제한 초과 / 901 계정 만료
+_FATAL_STATUS = {"010", "011", "012", "020", "901"}
+
+
+class DartFatalError(RuntimeError):
+    """키 오류·한도 초과처럼 재시도해도 소용없는 DART 오류."""
 
 
 def _throttle():
@@ -102,7 +117,7 @@ def _get(path: str, params: dict, retries: int = 3):
             time.sleep(0.5 * (attempt + 1))
     if last_exc:
         raise last_exc
-    return None
+    raise RuntimeError(f"DART 응답을 받지 못했습니다({path}, 재시도 초과)")
 
 
 def _load_corpcode_cache():
@@ -119,8 +134,21 @@ def _load_corpcode_cache():
 def _download_corpcode_map(log_cb=None):
     """DART 전체 상장사의 (종목코드6자리 -> corp_code8자리) 매핑을 받아온다."""
     resp = _get("corpCode.xml", params={})
-    with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
-        xml_bytes = zf.read(zf.namelist()[0])
+    try:
+        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+            xml_bytes = zf.read(zf.namelist()[0])
+    except zipfile.BadZipFile:
+        # 키 오류 등은 zip 대신 <result><status>…</status><message>…</message> 로 온다.
+        status = message = ""
+        try:
+            err = ET.fromstring(resp.content)
+            status = (err.findtext("status") or "").strip()
+            message = (err.findtext("message") or "").strip()
+        except Exception:
+            pass
+        if status in _FATAL_STATUS:
+            raise DartFatalError(f"DART 오류 {status}: {message}")
+        raise RuntimeError(f"DART 상장사 코드 파일을 받지 못했습니다 (status={status or '?'} {message})")
     root = ET.fromstring(xml_bytes)
 
     mapping = {}
@@ -153,11 +181,13 @@ _REPORT_CANDIDATES_BY_YEAR_OFFSET = {
     2: ["11011"],
 }
 
+_REPORT_LABELS = {"11011": "사업보고서", "11012": "반기", "11013": "1분기", "11014": "3분기"}
+_CUMULATIVE_REPORTS = ("11012", "11014")   # 누적금액(thstrm_add_amount)을 제공하는 보고서
+
 _ACCOUNT_ALIASES = {
-    "assets": ["자산총계"],
     "liabilities": ["부채총계"],
     "equity": ["자본총계"],
-    "revenue": ["매출액", "수익(매출액)"],
+    "revenue": ["매출액", "수익(매출액)", "영업수익", "영업수익(매출액)", "매출"],
     "operating_profit": ["영업이익", "영업이익(손실)"],
     "net_profit": ["당기순이익", "당기순이익(손실)"],
 }
@@ -205,50 +235,71 @@ def _extract_accounts(rows):
                 by_fs[fs_div][key] = {
                     "thstrm": _parse_amount(row.get("thstrm_amount")),
                     "frmtrm": _parse_amount(row.get("frmtrm_amount")),
+                    "thstrm_add": _parse_amount(row.get("thstrm_add_amount")),
+                    "frmtrm_add": _parse_amount(row.get("frmtrm_add_amount")),
                 }
 
     chosen = by_fs["CFS"] if len(by_fs["CFS"]) >= len(by_fs["OFS"]) else by_fs["OFS"]
     return chosen if chosen else None
 
 
+def _yoy(cur, prev):
+    """전년 동기 대비 증감률(%). 기준값이 0 이하이면 의미가 없으므로 None."""
+    if cur is None or prev is None or prev <= 0:
+        return None
+    return (cur - prev) / prev * 100
+
+
 def _compute_metrics(accounts, year, reprt_code):
-    def thstrm(key):
+    """
+    손익 항목은 반기/3분기 보고서에서 '누적' 금액이 있으면 누적끼리 비교한다
+    (없으면 해당 분기 단독 금액). 어느 쪽을 썼는지는 period 라벨에 표시한다.
+    """
+    use_add = reprt_code in _CUMULATIVE_REPORTS
+
+    def pair(key):
+        v = accounts.get(key)
+        if not v:
+            return None, None, False
+        if use_add and v.get("thstrm_add") is not None and v.get("frmtrm_add") is not None:
+            return v["thstrm_add"], v["frmtrm_add"], True
+        return v["thstrm"], v["frmtrm"], False
+
+    def bs(key):
         v = accounts.get(key)
         return v["thstrm"] if v else None
 
-    def frmtrm(key):
-        v = accounts.get(key)
-        return v["frmtrm"] if v else None
-
-    assets = thstrm("assets")
-    liabilities = thstrm("liabilities")
-    equity = thstrm("equity")
-    revenue_t, revenue_f = thstrm("revenue"), frmtrm("revenue")
-    op_t, op_f = thstrm("operating_profit"), frmtrm("operating_profit")
-    net_t = thstrm("net_profit")
+    liabilities, equity = bs("liabilities"), bs("equity")
+    revenue_t, revenue_f, _ = pair("revenue")
+    op_t, op_f, op_cum = pair("operating_profit")
+    net_t, _, _ = pair("net_profit")
 
     debt_ratio = (liabilities / equity * 100) if (liabilities is not None and equity) else None
-    revenue_yoy = ((revenue_t - revenue_f) / abs(revenue_f) * 100) if (revenue_t is not None and revenue_f) else None
-    op_profit_yoy = ((op_t - op_f) / abs(op_f) * 100) if (op_t is not None and op_f) else None
-    op_profit_positive = (op_t > 0) if op_t is not None else None
-    net_profit_positive = (net_t > 0) if net_t is not None else None
+
+    base = _REPORT_LABELS.get(reprt_code, reprt_code)
+    if reprt_code in _CUMULATIVE_REPORTS:
+        label = f"{year} {base}({'누적' if op_cum else '분기 단독'})"
+    else:
+        label = f"{year} {base}"
 
     return {
         "debt_ratio": debt_ratio,
-        "revenue_yoy": revenue_yoy,
-        "op_profit_yoy": op_profit_yoy,
-        "op_profit_positive": op_profit_positive,
-        "net_profit_positive": net_profit_positive,
-        "period": f"{year} {reprt_code}",
+        "revenue_yoy": _yoy(revenue_t, revenue_f),
+        "op_profit_yoy": _yoy(op_t, op_f),
+        "op_turnaround": bool(op_t is not None and op_f is not None and op_f <= 0 < op_t),
+        "op_profit_positive": (op_t > 0) if op_t is not None else None,
+        "net_profit_positive": (net_t > 0) if net_t is not None else None,
+        "period": label,
     }
 
 
 def fetch_financials(stock_code6: str, log_cb=None):
     """
     종목의 최신 재무 펀더멘털을 반환한다.
-    반환: {debt_ratio, revenue_yoy, op_profit_yoy, op_profit_positive,
-           net_profit_positive, period} 또는 None(조회 불가)
+    반환: {debt_ratio, revenue_yoy, op_profit_yoy, op_turnaround, op_profit_positive,
+           net_profit_positive, period} 또는 None(조회 불가/공시 없음)
     모든 값은 개별적으로 None일 수 있다(그 계정이 공시에 없는 경우).
+    키 오류·한도 초과 시 DartFatalError 를 던진다.
     """
     def log(msg):
         if log_cb:
@@ -260,11 +311,14 @@ def fetch_financials(stock_code6: str, log_cb=None):
 
     cache = _load_fin_cache()
     cached = cache.get(corp_code)
-    if cached and time.time() - cached.get("fetched_at", 0) < _FIN_TTL:
-        return cached.get("metrics")
+    if cached and cached.get("v") == _CACHE_VERSION:
+        ttl = _FIN_TTL if cached.get("metrics") else _NODATA_TTL
+        if time.time() - cached.get("fetched_at", 0) < ttl:
+            return cached.get("metrics")
 
     import datetime
     this_year = datetime.datetime.now().year
+    transient = False   # 네트워크/일시 오류가 한 번이라도 있었는가 → 있으면 '없음'으로 캐시하지 않는다
 
     for year_offset, reprt_codes in _REPORT_CANDIDATES_BY_YEAR_OFFSET.items():
         year = this_year - year_offset
@@ -276,22 +330,29 @@ def fetch_financials(stock_code6: str, log_cb=None):
                 )
                 j = resp.json()
             except Exception as e:
+                transient = True
                 log(f"[DART] {stock_code6} 재무조회 실패({year}/{reprt_code}): {e}")
                 continue
 
-            if j.get("status") != "000":
-                continue  # 해당 분기 보고서 아직 미제출 등 — 다음 후보로
+            status = j.get("status")
+            if status == "000":
+                accounts = _extract_accounts(j.get("list") or [])
+                if not accounts:
+                    continue
+                metrics = _compute_metrics(accounts, year, reprt_code)
+                cache[corp_code] = {"v": _CACHE_VERSION, "fetched_at": time.time(), "metrics": metrics}
+                _save_fin_cache(cache)
+                return metrics
+            if status == "013":
+                continue  # 해당 보고서 미제출/조회 데이터 없음 — 다음 후보로
+            if status in _FATAL_STATUS:
+                raise DartFatalError(f"DART 오류 {status}: {j.get('message', '')}")
+            transient = True   # 800(점검), 900 등 일시 오류
 
-            accounts = _extract_accounts(j.get("list") or [])
-            if not accounts:
-                continue
+    if transient:
+        return None  # 캐시하지 않고 다음 스캔에서 재시도
 
-            metrics = _compute_metrics(accounts, year, reprt_code)
-            cache[corp_code] = {"fetched_at": time.time(), "metrics": metrics}
-            _save_fin_cache(cache)
-            return metrics
-
-    # 아무 후보에서도 데이터를 못 찾음 — 조회 불가로 캐시(짧게)해서 반복 재시도 방지
-    cache[corp_code] = {"fetched_at": time.time(), "metrics": None}
+    # 모든 후보가 '공시 없음' — 짧게만 캐시
+    cache[corp_code] = {"v": _CACHE_VERSION, "fetched_at": time.time(), "metrics": None}
     _save_fin_cache(cache)
     return None

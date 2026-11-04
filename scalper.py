@@ -10,19 +10,15 @@ scalper.py — 초단타(몇 분~몇 시간) 모니터링 전용 툴.
   ② 체결강도 (매수체결량/매도체결량*100 — 100 넘으면 매수가 더 세게 붙는 중)
   ③ 폴링 주기 동안의 거래량 급증
   ④ 직전 폴링 대비 급등/급락
-을 계산해서 표에 보여준다. 단일 신호 1개만 뜬 건 노이즈일 확률이 높아서
-로그엔 쿨다운을 걸어 자주 안 남기고, **신호 2개 이상이 같은 방향으로 동시에
-뜨는 "복합 신호"만 🔥로 바로 로그**에 남긴다.
+을 계산해서 표에 보여주고, 임계값을 넘으면 알림 로그에 남긴다.
 
-복합 신호가 뜨면 1분/3분/5분 뒤 실제로 그 방향으로 움직였는지 자동으로
-추적해서 "신호 검증" 로그에 남기고 적중률을 집계한다 — 이 신호들을 믿어도
-되는지 스스로 판단할 근거를 쌓기 위함이다. 기록은 signal_log.csv에 누적된다.
-
-보유 포지션 추적도 있다: 매수가/수량/손절%/목표% 를 등록해두면 현재가가
-손절가·목표가에 닿았을 때 알림을 준다(주문은 안 넣음 — 알림만).
+신호 2개 이상이 같은 방향으로 동시에 뜨면(복합 신호) 1분/3분/5분 뒤 실제로 그 방향으로
+움직였는지 자동 추적해서 로그와 signal_log.csv에 남기고 적중률을 집계한다 — 어떤 신호
+조합이 쓸만한지 데이터로 판단할 근거를 쌓기 위함.
 
 포지션 크기 계산기도 포함: 투자금 + 손절% 를 넣으면 몇 주를 살 수 있는지,
 목표가/손절가가 얼마인지 계산해준다 — 이것도 참고용 숫자일 뿐 자동 주문 아님.
+"→ 포지션 등록"으로 등록해두면 현재가가 손절가/목표가에 닿을 때 알림도 준다(주문은 안 넣음).
 
 실행: python scalper.py
 준비: pip install -r requirements.txt   (kis_feed.py 도 같은 폴더에)
@@ -40,19 +36,52 @@ from tkinter import ttk, messagebox
 import kis_feed as kf
 
 # ── 신호 기준값 (GUI에서도 조절 가능) ───────────────────────────
-DEFAULT_POLL_SEC = 3          # 폴링 주기(초). 종목 수 * 2회 호출 / 주기 가 KIS 레이트리밋 이내여야 함
+DEFAULT_POLL_SEC = 3          # 폴링 주기(초). 종목 수 * 3회 호출(현재가+호가+체결강도) / 주기 가 KIS 레이트리밋 이내여야 함
 BID_ASK_RATIO_HIGH = 1.8      # 총매수잔량/총매도잔량 이 이 값 넘으면 "매수우위"
 BID_ASK_RATIO_LOW = 1 / 1.8   # 이 값 밑돌면 "매도우위"
 CTTR_HIGH = 150.0             # 체결강도 100 = 매수/매도 균형. 150 이상이면 매수 쏠림
 CTTR_LOW = 70.0                # 70 이하면 매도 쏠림
 SURGE_PCT = 1.0                # 폴링 간격 사이 가격이 이 비율(%) 이상 움직이면 급등/급락 알림
 VOLUME_SURGE_RATIO = 3.0       # 직전 폴링 대비 거래량 증가분이 이 배수 넘으면 거래량 급증 알림
+VOLUME_SURGE_MIN_VALUE = 100_000_000  # 단, 증가분 거래대금(증가량×현재가)이 1억원 이상일 때만
+                                      # (실사용에서 94주 같은 미미한 체결에도 '급증'이 떠서 추가)
 
-SINGLE_SIGNAL_COOLDOWN_SEC = 45   # 단일 신호(노이즈 가능성 높음)는 종목당 이 시간 안엔 중복 로그 안 함
+# 상태형 신호: 조건이 유지되는 동안 매 폴링 계속 참이 되는 신호. 로그엔 새로 생기거나
+# 바뀔 때(예: 매수우위→매도우위)만 남긴다. 급등/급락/거래량 급증 같은 순간 이벤트는 매번 기록.
+_STATE_SIGNAL_PREFIXES = ("체결강도", "호가")
+
 VERIFY_HORIZONS_SEC = (60, 180, 300)   # 복합신호 적중 검증 시점: 1분/3분/5분 후
 VERIFY_STAT_HORIZON_SEC = 180          # 적중률 집계는 이 시점(3분) 기준으로만
 VERIFY_HIT_THRESHOLD_PCT = 0.1         # 기대 방향으로 이 이상 움직였으면 '적중'
 SIGNAL_LOG_FILE = Path(__file__).with_name("signal_log.csv")
+
+
+def _signal_direction(labels):
+    """표에 뜬 신호 라벨들에서 방향을 추정한다.
+    급등/체결강도매수쏠림/호가매수우위 = up, 급락/매도쏠림/매도우위 = down.
+    신호가 2개 이상이면서 방향 충돌이 없을 때만(모두 up 이거나 모두 down) 방향을 돌려준다.
+    거래량 급증처럼 방향이 없는 신호는 개수만 채워주고 방향 판단엔 끼지 않는다."""
+    dirs = set()
+    for l in labels:
+        if l.startswith("급등") or "매수쏠림" in l or "매수우위" in l:
+            dirs.add("up")
+        elif l.startswith("급락") or "매도쏠림" in l or "매도우위" in l:
+            dirs.add("down")
+    if len(labels) >= 2 and len(dirs) == 1:
+        return next(iter(dirs))
+    return None
+
+
+def _load_stock_names():
+    """gui.py(대장주 발굴기)가 만들어 둔 종목 마스터 캐시에서 코드→종목명을 읽는다.
+    KIS 현재가 응답엔 종목명이 없어서다. 캐시가 없으면 빈 dict(코드로 표시)."""
+    import json
+    from pathlib import Path
+    try:
+        cache = json.loads(Path(__file__).with_name(".krx_master_cache.json").read_text(encoding="utf-8"))
+        return {str(r["code"]): str(r["name"]) for r in cache.get("records", []) if r.get("code")}
+    except Exception:
+        return {}
 
 
 class Watcher:
@@ -65,53 +94,61 @@ class Watcher:
         self.last_volume = None
         self.last_update = None
         self._prev_delta = None
+        self._active_states: set[str] = set()   # 직전 폴링에 켜져 있던 상태형 신호 종류
 
     def update(self, rt: dict, ob: dict | None):
-        """
-        반환: (labels: list[str], composite: bool, direction: "up"|"down"|None)
-        composite = 신호 2개 이상이 서로 충돌 없이(같은 방향으로) 동시에 떴을 때 True.
-        direction 은 composite일 때만 의미 있음 — 검증 추적에 쓴다.
-        """
-        items = []  # (label, direction)
+        signals = []
         price = rt.get("price")
         volume = rt.get("volume")
 
         if self.last_price is not None and price:
             move_pct = (price - self.last_price) / self.last_price * 100
             if move_pct >= SURGE_PCT:
-                items.append((f"급등 +{move_pct:.1f}%", "up"))
+                signals.append(f"급등 +{move_pct:.1f}%")
             elif move_pct <= -SURGE_PCT:
-                items.append((f"급락 {move_pct:.1f}%", "down"))
+                signals.append(f"급락 {move_pct:.1f}%")
 
         if self.last_volume is not None and volume is not None:
             delta = volume - self.last_volume
-            if self._prev_delta and delta > self._prev_delta * VOLUME_SURGE_RATIO:
-                items.append((f"거래량 급증({delta:,}주)", None))
+            delta_value = delta * price if price else 0
+            if (self._prev_delta and delta > self._prev_delta * VOLUME_SURGE_RATIO
+                    and delta_value >= VOLUME_SURGE_MIN_VALUE):
+                signals.append(f"거래량 급증({delta:,}주·{delta_value / 1e8:.1f}억)")
             self._prev_delta = delta
 
         cttr = rt.get("cttr")
         if cttr is not None:
             if cttr >= CTTR_HIGH:
-                items.append((f"체결강도 매수쏠림({cttr:.0f})", "up"))
+                signals.append(f"체결강도 매수쏠림({cttr:.0f})")
             elif cttr <= CTTR_LOW:
-                items.append((f"체결강도 매도쏠림({cttr:.0f})", "down"))
+                signals.append(f"체결강도 매도쏠림({cttr:.0f})")
 
         if ob and ob.get("bid_ask_ratio") is not None:
             r = ob["bid_ask_ratio"]
             if r >= BID_ASK_RATIO_HIGH:
-                items.append((f"호가 매수우위({r:.1f}배)", "up"))
+                signals.append(f"호가 매수우위({r:.1f}배)")
             elif r <= BID_ASK_RATIO_LOW:
-                items.append((f"호가 매도우위({1/r if r else 0:.1f}배)", "down"))
+                signals.append(f"호가 매도우위({1/r if r else 0:.1f}배)")
 
         self.last_price = price
         self.last_volume = volume
         self.last_update = time.time()
+        return signals
 
-        labels = [l for l, _ in items]
-        dirs = {d for _, d in items if d}
-        composite = len(items) >= 2 and len(dirs) <= 1
-        direction = next(iter(dirs)) if (composite and dirs) else None
-        return labels, composite, direction
+    def signals_to_log(self, signals):
+        """로그에 남길 신호만 고른다. 상태형(체결강도/호가)은 새로 생기거나 바뀔 때만,
+        이벤트형(급등/급락/거래량 급증)은 매번. 표의 신호 칸은 이와 무관하게 매번 갱신된다."""
+        out, states = [], set()
+        for sig in signals:
+            if sig.startswith(_STATE_SIGNAL_PREFIXES):
+                kind = sig.split("(")[0]          # 예: '호가 매수우위(2.8배)' → '호가 매수우위'
+                states.add(kind)
+                if kind not in self._active_states:
+                    out.append(sig)
+            else:
+                out.append(sig)
+        self._active_states = states
+        return out
 
 
 class ScalperApp(tk.Tk):
@@ -126,12 +163,10 @@ class ScalperApp(tk.Tk):
         self._stop_requested = False
         self._msg_queue: "queue.Queue" = queue.Queue()
 
-        self._last_single_log: dict[str, float] = {}   # code -> 마지막 단일신호 로그 시각(쿨다운용)
-        self._last_price: dict[str, float] = {}         # code -> 가장 최근 수신 현재가(검증용)
-        self._pending_verifications: list[dict] = []    # 복합신호 적중 검증 대기열
+        self._last_price: dict[str, float] = {}          # code -> 가장 최근 수신 현재가(검증/포지션용)
+        self._pending_verifications: list[dict] = []      # 복합신호 적중 검증 대기열
         self._verify_stats = {"total": 0, "hit": 0}
-
-        self._positions: dict[str, dict] = {}            # code -> {entry, qty, stop, target, stop_alerted, target_alerted}
+        self._positions: dict[str, dict] = {}              # code -> {entry, qty, stop, target, stop_alerted, target_alerted}
 
         self._build_widgets()
         self._load_saved_keys()
@@ -302,17 +337,15 @@ class ScalperApp(tk.Tk):
 
     # ── 포지션 추적 ──────────────────────────────────────────
     def _register_position_from_calc(self):
-        code = None
         codes = [c.strip().zfill(6) for c in self.var_codes.get().split(",") if c.strip()]
-        if len(codes) == 1:
-            code = codes[0]
-        if not code:
+        if len(codes) != 1:
             messagebox.showwarning(
                 "종목 특정 필요",
                 "워치리스트에 종목을 정확히 1개만 입력한 상태에서 눌러주세요.\n"
                 "(여러 종목이면 어떤 종목 포지션인지 특정할 수 없습니다)",
             )
             return
+        code = codes[0]
         result = self._compute_position()
         if not result:
             messagebox.showwarning("입력 필요", "매수가를 입력하세요.")
@@ -324,13 +357,12 @@ class ScalperApp(tk.Tk):
             "stop_alerted": False, "target_alerted": False,
         }
         if code not in self._watchers:
-            self._watchers[code] = Watcher(code)
+            self._watchers[code] = Watcher(code, _load_stock_names().get(code, ""))
         self._refresh_position_row(code)
         self._append_log(f"[포지션 등록] {code} 매수가 {entry:,} · 손절 {stop_price:,} · 목표 {target_price:,}")
 
     def _remove_selected_position(self):
-        sel = self.pos_tree.selection()
-        for iid in sel:
+        for iid in self.pos_tree.selection():
             self._positions.pop(iid, None)
             self.pos_tree.delete(iid)
 
@@ -346,11 +378,9 @@ class ScalperApp(tk.Tk):
         status = "보유중"
         if price is not None:
             if price <= pos["stop"]:
-                status = "⚠ 손절가 도달"
-                tag = "stop_hit"
+                status, tag = "⚠ 손절가 도달", "stop_hit"
             elif price >= pos["target"]:
-                status = "🎯 목표가 도달"
-                tag = "target_hit"
+                status, tag = "🎯 목표가 도달", "target_hit"
 
         values = (
             name, code, f"{pos['entry']:,}", f"{pos['qty']:,}",
@@ -398,9 +428,10 @@ class ScalperApp(tk.Tk):
 
         for item in self.tree.get_children():
             self.tree.delete(item)
-        self._watchers = {c: Watcher(c) for c in codes}
+        names = _load_stock_names()
+        self._watchers = {c: Watcher(c, names.get(c, "")) for c in codes}
         for c in codes:
-            self.tree.insert("", "end", iid=c, values=(c, c, "-", "-", "-", "-", ""))
+            self.tree.insert("", "end", iid=c, values=(names.get(c, c), c, "-", "-", "-", "-", ""))
         for c in self._positions:
             self._refresh_position_row(c)
 
@@ -442,23 +473,20 @@ class ScalperApp(tk.Tk):
                     continue
                 if not rt:
                     continue
-                labels, composite, direction = watcher.update(rt, ob)
-                price = rt.get("price")
-                self._msg_queue.put(("row", code, rt, ob, labels))
+                # 체결강도는 별도 API — 실패해도 현재가/호가 표시는 계속한다
+                try:
+                    rt["cttr"] = kf.fetch_cttr(code)
+                except Exception:
+                    rt["cttr"] = None
+                signals = watcher.update(rt, ob)
+                self._msg_queue.put(("row", code, rt, ob, signals))
+                for s in watcher.signals_to_log(signals):
+                    self._msg_queue.put(("log", f"[{watcher.name or code}] {s}"))
 
-                if composite:
-                    tag = "🔥"
-                    self._msg_queue.put((
-                        "log", f"{tag} [{watcher.name or code}] 복합신호: " + " / ".join(labels)
-                    ))
-                    if direction and price:
-                        self._msg_queue.put(("verify_new", code, watcher.name, price, direction, time.time()))
-                elif labels:
-                    now = time.time()
-                    last = self._last_single_log.get(code, 0)
-                    if now - last >= SINGLE_SIGNAL_COOLDOWN_SEC:
-                        self._last_single_log[code] = now
-                        self._msg_queue.put(("log", f"[{watcher.name or code}] " + " / ".join(labels)))
+                price = rt.get("price")
+                direction = _signal_direction(signals)
+                if direction and price:
+                    self._msg_queue.put(("verify_new", code, watcher.name, price, direction, time.time()))
 
             elapsed = time.time() - t0
             wait = max(0.0, poll_sec - elapsed)
@@ -475,8 +503,8 @@ class ScalperApp(tk.Tk):
                 item = self._msg_queue.get_nowait()
                 kind = item[0]
                 if kind == "row":
-                    _, code, rt, ob, labels = item
-                    self._update_row(code, rt, ob, labels)
+                    _, code, rt, ob, signals = item
+                    self._update_row(code, rt, ob, signals)
                 elif kind == "log":
                     self._append_log(item[1])
                 elif kind == "row_error":
@@ -513,10 +541,8 @@ class ScalperApp(tk.Tk):
                     continue
                 v["done"].add(horizon)
                 change_pct = (cur_price - v["price"]) / v["price"] * 100
-                if v["direction"] == "up":
-                    hit = change_pct >= VERIFY_HIT_THRESHOLD_PCT
-                else:
-                    hit = change_pct <= -VERIFY_HIT_THRESHOLD_PCT
+                hit = change_pct >= VERIFY_HIT_THRESHOLD_PCT if v["direction"] == "up" \
+                    else change_pct <= -VERIFY_HIT_THRESHOLD_PCT
                 mark = "✅적중" if hit else "❌불발"
                 mins = horizon // 60
                 self._append_log(
@@ -534,8 +560,7 @@ class ScalperApp(tk.Tk):
         self._pending_verifications = still_pending
 
     def _update_stats_label(self):
-        total = self._verify_stats["total"]
-        hit = self._verify_stats["hit"]
+        total, hit = self._verify_stats["total"], self._verify_stats["hit"]
         if total == 0:
             self.lbl_stats.configure(text="복합신호 적중률(3분 기준): 아직 데이터 없음")
         else:

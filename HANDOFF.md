@@ -67,20 +67,50 @@
     쏠림, 거래량 급증 네 가지를 계산한다. **주문 관련 코드는 전혀 없다** —
     `_poll_worker`는 `kf.fetch_realtime`/`kf.fetch_orderbook`만 호출한다.
 
+11. **로컬 버전과 통합 (2026-11-04)** — 사용자 PC에서 pull이 계속 막혀 있었는데,
+    확인해보니 로컬 코드는 채팅 복사본이 아니라 `926ec8f`에서 **별도로 크게 발전한
+    버전**이었다(다른 도구로 받은 `auto_finder_fixed.zip` 등). 백업 브랜치
+    `local-backup-1104`(`45b3aa1`)로 올려받아 비교 후, 사용자 선택에 따라
+    **로컬 버전을 기준**으로 GitHub 쪽을 merge했다. 로컬 버전에 있던 것:
+    추천 후보 3종목(점수화·업종 분산 — 매수 권유 아님), 외국인/기관 5일 수급
+    (`fetch_investor_flow`), 일봉 디스크 캐시·종목 마스터 캐시, 장중 미완성 봉 처리,
+    200일선 기울기, 금융업 부채비율 면제, 관리종목 제외, 조건값 저장(`gui_settings.json`),
+    JWT 기반 토큰 만료, DART 캐시 버전·오류별 캐시 규칙, 루트 `test_auto_finder.py`.
+    GitHub 쪽에서 옮겨 붙인 것: `scalper.py`, `fetch_orderbook()`, `fetch_realtime()`의
+    전일대비/등락률/누적거래량/체결강도 필드(기존 키는 그대로, 키만 추가),
+    HANDOFF.md, dart_key.example.json. 내가 만들었던 `tests/`·`_is_common_stock()`은
+    로컬 구조(종목 마스터 레코드)와 안 맞아 버리고 아래 12번으로 대체.
+12. **버그 수정 — 메리츠금융지주가 리츠로 분류돼 빠지던 문제**: `_df_to_records()`가
+    이름에 '리츠'가 *포함*되면 RT로 분류해서, 2026-11-03 KRX 실데이터 기준
+    메리츠금융지주(시총 21.8조)·블리츠웨이엔터테인먼트·메리츠제1/2호스팩이 잘못 분류됨.
+    '리츠'로 *끝나는* 경우만 RT로 변경. (이 버그는 GitHub판 키워드 필터에도 있었다.)
+    남은 예외: `이리츠코크렙`(이름이 리츠로 안 끝나는 리츠, 소형이라 기본값 영향 없음)
+13. `.gitignore`에 로컬 버전이 만드는 캐시(`.krx_master_cache.json`, `.price_cache/`,
+    `.last_scan.json`)와 `gui_settings.json`, `desktop.ini` 추가 — README엔 "git 제외"라고
+    적혀 있었는데 실제로는 빠져 있었음
+
+14. **scalper 신호 노이즈 정리 (2026-11-04, 사용자 요청)**: 실사용에서 ① '거래량 급증(94주)'처럼
+    미미한 체결에도 급증이 뜨고 ② 같은 '호가 매수우위'가 매 폴링 로그에 반복됨.
+    ① 증가분 거래대금(증가량×현재가) 1억원 이상 조건 추가(`VOLUME_SURGE_MIN_VALUE`, 사용자 지정값)
+    ② `Watcher.signals_to_log()` — 상태형(체결강도/호가)은 새로 생기거나 바뀔 때만 로그,
+    이벤트형(급등/급락/거래량 급증)은 매번. 표의 신호 칸은 그대로 매번 갱신
+
 ## 파일 구성
 
-- `kis_feed.py` — KIS Open API 래퍼. 토큰 발급/캐시, 일봉(`_get` via
-  `inquire-daily-itemchartprice`), 현재가+PER+PBR+체결강도(`fetch_realtime`),
+- `kis_feed.py` — KIS Open API 래퍼. 토큰 발급/캐시(JWT 만료), 일봉, 현재가+PER+PBR+
+  업종+위험플래그+체결강도(`fetch_realtime`), 투자자 수급(`fetch_investor_flow`),
   호가(`fetch_orderbook`), 레이트리밋(`_throttle`, 모의/실전 분리)
 - `dart_feed.py` — DART Open API 래퍼. corp_code 매핑 캐시(`.dart_corpcode_cache.json`,
   30일 TTL), 재무제표 캐시(`.dart_financials_cache.json`, 7일 TTL)
-- `auto_finder.py` — 스윙 스크리닝 핵심 로직. `run_scan()`이 GUI가 호출하는
-  진입점. `load_top_marcap()`이 KRX 시총 유니버스를 가져옴 (위 7번 버그 수정 참고)
+- `auto_finder.py` — 스윙 스크리닝·점수화 핵심 로직. `run_scan()`이 GUI 진입점(ScanResult 반환),
+  `load_top_marcap()`이 종목 마스터(`_load_master_records`)에서 대형 보통주를 고름,
+  `pick_top()`이 추천 후보 3종목 선정
+- `test_auto_finder.py` — 단위 테스트(`python -m unittest test_auto_finder`, 네트워크·키 불필요)
 - `gui.py` — 대장주 자동 발굴기 GUI (스윙)
 - `scalper.py` — 초단타 모니터링 GUI (신호 전용)
 - `diag_marcap.py` — KRX 시총 데이터 진단용 일회성 스크립트 (디버깅 때 만듦,
   정식 기능 아님 — 필요 없어지면 삭제해도 됨)
-- `requirements.txt` — `finance-datareader`, `requests` (tkinter는 표준 라이브러리)
+- `requirements.txt` — `finance-datareader`, `requests>=2.28`, `pandas>=1.5` (tkinter는 표준 라이브러리)
 - `kis_keys.example.json`, `dart_key.example.json` — 키 포맷 예시. 실제 키 파일
   (`kis_keys.json`, `dart_key.json`, `.kis_token_cache.json`,
   `.dart_corpcode_cache.json`, `.dart_financials_cache.json`)은 `.gitignore`에
@@ -91,24 +121,24 @@
 1. **보안**: 사용자의 작업 폴더가 OneDrive 동기화 폴더 안에 있다. `kis_keys.json`
    등은 평문 저장이라 OneDrive로 그대로 업로드된다. README에 경고는 적어뒀지만
    폴더를 옮기라고 강제하진 않았다 — 사용자가 선택할 문제.
-2. **로컬 untracked/modified 충돌**: 최근 세션에서 사용자가 `git pull`을 시도했을 때
-   로컬에 `.gitignore`/`README.md`/`auto_finder.py`/`gui.py`/`kis_feed.py`가
-   수정된 상태였고, `dart_feed.py`/`dart_key.example.json`은 untracked로 이미
-   존재해서 pull이 막혔다. `git stash -u` 후 pull하라고 안내했는데, **이 세션
-   종료 시점까지 사용자가 결과를 보고하지 않았다** — 다음 세션 시작하면 먼저
-   사용자에게 pull이 잘 됐는지, `git log -1`이 `91bcad3`(또는 그 이후 커밋)를
-   가리키는지 확인할 것. stash가 남아있다면(`git stash list`) 안에 사용자의
-   실제 편집이 들어있는지 확인 후 처리(절대 임의로 drop하지 말 것).
-3. **체결강도(`cttr`) 필드 검증 안 됨**: `kis_feed.py`의 `fetch_realtime()`에서
-   체결강도를 KIS 표준 필드(`shnu_cntg_qty`/`seln_cntg_qty`)로 직접 계산하도록
-   구현했다. 이 필드명은 일반적으로 알려진 이름이긴 하나, **실제 KIS 응답으로
-   검증된 적은 없다**(이 세션엔 KIS API에 직접 붙을 네트워크 접근이 없었음 —
-   코드는 전부 mock으로만 테스트됨). 사용자가 `scalper.py`를 처음 돌릴 때
-   체결강도 값이 이상하면(항상 None이거나 비현실적인 값) 이 필드명부터 의심할 것.
-4. **호가 API(`fetch_orderbook`)도 마찬가지로 mock 테스트만 거쳤다** — 실제
-   KIS 응답 필드명(`askp1`~`askp10`, `bidp_rsqn1`~`bidp_rsqn10`,
-   `total_askp_rsqn`/`total_bidp_rsqn`)이 맞는지 실사용 확인 필요.
-5. **`scalper.py`는 종목당 폴링 1회에 API 호출 2번**(현재가+호가)을 쓴다.
+2. **사용자 PC 동기화 — 2026-11-04 완료**: PC가 `claude/amazing-rubin-w62q9y`의
+   통합 커밋(`d7a3847`)과 일치함을 `git status`로 확인. 남은 로컬 상태:
+   `kis_keys.example.json` 수정분(키가 있을 수 있어 일부러 커밋 안 함),
+   untracked `auto_finder_fixed.zip`·`gitignore`(점 없는 옛 파일)·투자 판단 기준 메모 txt
+   (사용자 개인 메모 — 건드리지 말 것), 예전 `stash@{0}`(백업 브랜치와 같은 내용).
+   백업: 원격 브랜치 `local-backup-1104`, PC 폴더 `대장주_스윙_백업_1104`.
+   정리(삭제)는 사용자 판단에 맡김 — 임의로 지우라고 하지 말 것.
+   **이 저장소는 public이다** — 키가 들어갈 수 있는 파일은 절대 커밋하지 말 것.
+3. **체결강도 — 2026-11-04 실사용 버그 수정**: 처음엔 현재가 응답의
+   `shnu_cntg_qty`/`seln_cntg_qty`로 계산했는데, 실사용에서 체결강도가 항상 `-`로 나옴.
+   KIS 공식 샘플(github.com/koreainvestment/open-trading-api)을 확인해보니 그런 필드는
+   없었다. **주식현재가 체결 API(inquire-ccnl, FHKST01010300)의 `tday_rltv`(당일 체결강도)**로
+   교체(`kis_feed.fetch_cttr()`). **2026-11-04 12:00 실사용 확인 완료** — 코웨이 99,
+   삼성전자 66, SK하이닉스 97로 정상 표시, 종목명 표시·레이트리밋 경고 없음도 확인. KIS 필드를 새로 쓸 땐 추측하지 말고 이 공식 샘플
+   저장소(`examples_llm/domestic_stock/*/chk_*.py`의 COLUMN_MAPPING)부터 볼 것.
+4. **호가 API(`fetch_orderbook`)는 실사용 확인됨** — 2026-11-04 코웨이로 호가매수/매도비
+   0.85 정상 표시. 필드명도 공식 샘플과 일치.
+5. **`scalper.py`는 종목당 폴링 1회에 API 호출 3번**(현재가+호가+체결강도)을 쓴다.
    워치리스트가 크면 폴링 주기 안에 못 끝나거나 레이트리밋에 걸릴 수 있음 —
    README에 5~10종목 권장이라고 적어뒀다.
 6. **DART 계정명 매칭이 완벽하지 않을 수 있음** — `_ACCOUNT_ALIASES`에 흔한
@@ -119,11 +149,9 @@
 ## 테스트 방법 (이 환경은 tkinter/실제 API 접근이 없음)
 
 - 문법 검증: `python3 -c "import ast; ast.parse(open('파일명').read())"`
-- 로직 검증: `kis_feed`/`dart_feed`를 `sys.modules`에 가짜 모듈로 올려서
-  `requests.get`을 몽키패치하는 방식으로 각 함수 단위 테스트함 (이전 커밋들의
-  테스트 스니펫은 이 세션 대화 기록에 있지만 저장소에 테스트 파일로 남겨두진
-  않았음 — 필요하면 `tests/` 디렉터리를 새로 만들어 정식 테스트로 남기는 것도
-  고려할 만함)
+- 단위 테스트: 저장소 루트에서 `python -m unittest test_auto_finder` (KIS/DART는 `unittest.mock.patch`로 대체)
+- 시총 관련 수정은 FinanceData 캐시 CSV(`raw.githubusercontent.com/FinanceData/fdr_krx_data_cache/...`)로
+  실데이터 검증 가능 — 이 환경에서 접근됨
 - tkinter가 없는 환경에서 GUI 모듈 로직만 테스트하려면 `sys.modules`에
   `tkinter`/`tkinter.ttk`/`tkinter.messagebox` 더미 모듈을 올리고 import하면
   (`Watcher` 같은 순수 로직 클래스는) 테스트 가능 — `scalper.py`의 `Watcher`
@@ -131,11 +159,7 @@
 
 ## 다음에 할 만한 작업 후보 (요청받은 적은 없음, 참고용)
 
-- `scalper.py`의 체결강도/호가 필드명을 실사용자 피드백으로 검증
 - `gui.py`/`scalper.py`의 조건값들을 설정 파일로 분리해 재사용성 높이기
-- `auto_finder.py`의 ETF/우선주 제외가 종목명 키워드 매칭이라 완벽하지 않음
-  (이전 점검에서 지적됨, 아직 안 고침) — KRX 데이터의 시장/상품구분 컬럼
-  활용으로 개선 가능
 - DART 재무제표 API 호출 실패 시 사유를 로그에 더 자세히 남기기
 
 ## 톤/운영 원칙 (사용자 선호)
