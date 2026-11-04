@@ -85,6 +85,38 @@ def _fetch_history(code6: str, min_rows: int = 210, lookback: int = LOOKBACK):
     return sorted(collected.values(), key=lambda x: x["date"], reverse=True)
 
 
+_ETF_BRANDS = ("KODEX", "TIGER", "ACE ", "PLUS ", "RISE ", "SOL ", "KBSTAR", "HANARO",
+               "ARIRANG", "KOSEF", "TIMEFOLIO", "KIWOOM ")
+
+
+def _is_common_stock(code: str, name: str, dept: str = "") -> bool:
+    """
+    보통주(일반 상장회사)면 True. 우선주·스팩·리츠·ETF는 False.
+
+    예전엔 종목명에 키워드가 '포함'되는지로 걸렀는데, 실제 KRX 데이터로 확인해보니
+    '메리츠금융지주'(시총 20조+)가 '리츠'에 걸려 빠지고, 'YG PLUS'·'성우' 같은
+    보통주도 빠지는 반면 'CJ4우(전환)'·'아모레퍼시픽홀딩스3우C' 같은 우선주와
+    '...기업인수목적' 스팩은 통과하는 문제가 있었다. 그래서 이름 대신 KRX 규칙을 쓴다:
+      - 단축코드 끝자리: 보통주는 '0', 우선주는 5/7/9/K/L 등 (KRX 종목코드 체계)
+      - 소속부(Dept)에 'SPAC'이 있거나 이름에 스팩/기업인수목적이 있으면 스팩
+      - 리츠는 별도 구분 컬럼이 없어 이름이 '리츠'로 '끝나는' 경우만 제외
+        (포함 검사로 하면 메리츠·블리츠웨이 같은 회사가 같이 빠진다)
+      - ETF는 KRX-MARCAP 목록엔 원래 없지만, 데이터 소스가 바뀔 때를 대비해
+        운용사 브랜드로 '시작하는' 이름만 제외 (포함 검사 X — 'YG PLUS' 보호)
+    """
+    code = str(code).strip()
+    name = str(name).strip()
+    if not code or code[-1] != "0":
+        return False
+    if "SPAC" in (dept or "").upper() or "스팩" in name or "기업인수목적" in name:
+        return False
+    if name.endswith("리츠"):
+        return False
+    if name.upper().startswith(_ETF_BRANDS):
+        return False
+    return True
+
+
 def load_top_marcap(top_n: int, min_mcap_억: int, log_cb=None):
     """KRX 시총 상위 종목. 반환: [(code6, name, mcap억), ...]"""
     def log(msg):
@@ -157,6 +189,7 @@ def load_top_marcap(top_n: int, min_mcap_억: int, log_cb=None):
         )
 
     df = df.sort_values(mcap_col, ascending=False)
+    dept_col = cols.get("dept")  # 소속부(예: 'SPAC(소속부없음)'). 없는 데이터 소스도 있어 선택적으로 사용
 
     out = []
     skipped_no_mcap = 0
@@ -168,11 +201,9 @@ def load_top_marcap(top_n: int, min_mcap_억: int, log_cb=None):
             mcap_억 = int(mcap_won / 1e8) if mcap_won and mcap_won == mcap_won else None
         except Exception:
             mcap_억 = None
-        # ETF·우선주·스팩·리츠 등 제외
-        if any(k in name for k in ["우B", "우선", "스팩", "리츠", "TIGER", "KODEX",
-                                    "ETF", "ACE", "PLUS", "RISE", "SOL "]):
-            continue
-        if name.endswith("우"):   # 우선주
+        # 보통주만 남긴다 (우선주·스팩·리츠·ETF 제외) — 판별 근거는 _is_common_stock 참고
+        dept = str(row[dept_col]) if dept_col and row[dept_col] == row[dept_col] else ""
+        if not _is_common_stock(code, name, dept):
             continue
         if mcap_억 is None:
             skipped_no_mcap += 1

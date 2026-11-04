@@ -58,6 +58,7 @@ python scalper.py
 - `gui.py` — 대장주 자동 발굴기 Tkinter GUI
 - `scalper.py` — 초단타 모니터링 Tkinter GUI (신호 전용, 자동매매 아님)
 - `diag_marcap.py` — KRX 시총 데이터 문제 진단용 스크립트
+- `tests/` — 로직 단위 테스트 (네트워크·키 불필요): `python -m unittest discover -s tests -v`
 
 ## API 키 준비
 
