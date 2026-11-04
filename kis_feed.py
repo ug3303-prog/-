@@ -410,6 +410,17 @@ def fetch_realtime(code6: str):
     if _yn(out.get("sltr_yn")) == "Y":
         risk.append("정리매매")
 
+    # 아래는 scalper.py(초단타 모니터링)용 — 같은 응답에서 추가 호출 없이 뽑는다.
+    # ⚠️ shnu_cntg_qty/seln_cntg_qty 필드명은 실제 KIS 응답으로 검증된 적 없음(HANDOFF 참고).
+    buy_qty = _i(out.get("shnu_cntg_qty"))
+    sell_qty = _i(out.get("seln_cntg_qty"))
+    cttr = (buy_qty / sell_qty * 100) if (buy_qty is not None and sell_qty) else None
+
+    sign = _i(out.get("prdy_vrss_sign"), 0)  # 1,2=상승 4,5=하락 3=보합
+    change = _i(out.get("prdy_vrss"))
+    if change is not None and sign in (4, 5) and change > 0:
+        change = -change
+
     return {
         "price": price,
         "per": per,
@@ -417,6 +428,12 @@ def fetch_realtime(code6: str):
         "per_loss": per_loss,
         "sector": (out.get("bstp_kor_isnm") or "").strip(),
         "risk": risk,
+        "change": change,                      # 전일대비(부호 있음)
+        "change_pct": _f(out.get("prdy_ctrt")),  # 등락률(%)
+        "volume": _i(out.get("acml_vol")),     # 누적거래량
+        "buy_cntg_qty": buy_qty,               # 누적 매수체결량
+        "sell_cntg_qty": sell_qty,             # 누적 매도체결량
+        "cttr": cttr,                          # 체결강도(%) — 100 넘으면 매수우위
     }
 
 
@@ -456,4 +473,45 @@ def fetch_investor_flow(code6: str, days: int = 5):
         "orgn": sum(u[1] for u in usable),
         "unit": "주",
         "days": len(usable),
+    }
+
+
+def fetch_orderbook(code6: str):
+    """
+    실시간 호가(매수/매도 1~10단계 잔량) 조회 — scalper.py용.
+    ⚠️ askp/askp_rsqn/bidp/bidp_rsqn/total_*_rsqn 필드명은 실제 KIS 응답으로 검증된 적 없음.
+    반환: {
+      "ask1": int, "bid1": int,                    # 매도1호가/매수1호가
+      "total_ask_qty": int, "total_bid_qty": int,  # 총 매도/매수 잔량
+      "bid_ask_ratio": float|None,                 # 총매수잔량/총매도잔량 (1보다 크면 매수우위)
+      "levels": [(ask_price, ask_qty, bid_price, bid_qty), ...]  # 1~10단계
+    } 또는 None
+    """
+    j = _get(
+        "/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn",
+        tr_id="FHKST01010200",
+        params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code6},
+    )
+    out = (j or {}).get("output1") or {}
+    if not out:
+        return None
+
+    levels = []
+    for n in range(1, 11):
+        levels.append((
+            _i(out.get(f"askp{n}")), _i(out.get(f"askp_rsqn{n}")),
+            _i(out.get(f"bidp{n}")), _i(out.get(f"bidp_rsqn{n}")),
+        ))
+
+    total_ask = _i(out.get("total_askp_rsqn"))
+    total_bid = _i(out.get("total_bidp_rsqn"))
+    ratio = (total_bid / total_ask) if total_ask else None
+
+    return {
+        "ask1": _i(out.get("askp1")),
+        "bid1": _i(out.get("bidp1")),
+        "total_ask_qty": total_ask,
+        "total_bid_qty": total_bid,
+        "bid_ask_ratio": ratio,
+        "levels": levels,
     }

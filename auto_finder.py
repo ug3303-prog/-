@@ -247,7 +247,10 @@ def _df_to_records(df):
         group = "ST"
         if name.startswith(_ETF_PREFIXES):
             group = "EF"
-        elif "리츠" in name:
+        elif name.endswith("리츠"):
+            # '포함' 검사로 하면 메리츠금융지주(시총 20조+)·블리츠웨이·메리츠 스팩까지
+            # 리츠로 잘못 분류돼 빠진다(2026-11-03 KRX 실데이터로 확인). 리츠는 이름이
+            # '...리츠'로 끝나므로 끝말로 판별한다. (이리츠코크렙처럼 예외는 남음 — 소형이라 영향 적음)
             group = "RT"
         vol = row.get(vol_col) if vol_col else None
         records.append({

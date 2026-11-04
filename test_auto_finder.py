@@ -303,6 +303,76 @@ class KisTests(unittest.TestCase):
         self.assertEqual("제약", rt["sector"])
 
 
+class ReitClassificationTests(unittest.TestCase):
+    """'리츠' 포함 검사로 메리츠금융지주가 빠지던 버그 회귀 테스트 (2026-11-03 KRX 실데이터 기준 종목)."""
+
+    def _records(self):
+        import pandas as pd
+        df = pd.DataFrame({
+            "Code": ["138040", "369370", "395400", "0030R0", "123450"],
+            "Name": ["메리츠금융지주", "블리츠웨이엔터테인먼트", "SK리츠", "대신밸류리츠", "메리츠제1호스팩"],
+            "Dept": ["", "벤처기업부", "", "", "SPAC(소속부없음)"],
+            "Marcap": [218_220e8, 256e8, 14_539e8, 2_137e8, 100e8],
+        })
+        return {r["name"]: r for r in af._df_to_records(df)}
+
+    def test_meritz_and_blitzway_are_common_stock(self):
+        recs = self._records()
+        self.assertEqual("ST", recs["메리츠금융지주"]["그룹코드"])
+        self.assertEqual("ST", recs["블리츠웨이엔터테인먼트"]["그룹코드"])
+
+    def test_reits_still_excluded(self):
+        recs = self._records()
+        self.assertEqual("RT", recs["SK리츠"]["그룹코드"])
+        self.assertEqual("RT", recs["대신밸류리츠"]["그룹코드"])
+
+    def test_meritz_spac_is_spac_not_reit(self):
+        rec = self._records()["메리츠제1호스팩"]
+        self.assertEqual("ST", rec["그룹코드"])
+        self.assertEqual("Y", rec["SPAC"])
+
+    def test_meritz_enters_universe(self):
+        recs = list(self._records().values())
+        with patch.object(af, "_load_master_records", return_value=recs):
+            out = af.load_top_marcap(10, 1_000)
+        self.assertEqual(["138040"], [c for c, _, _ in out])
+
+
+class ScalperFeedTests(unittest.TestCase):
+    """scalper.py가 쓰는 현재가 확장 필드·호가 조회 (필드명은 mock 기준 — 실응답 미검증)."""
+
+    def test_realtime_scalper_fields(self):
+        out = {"stck_prpr": "70,000", "per": "12.5", "pbr": "1.1", "prdy_vrss": "1500", "prdy_vrss_sign": "5",
+               "prdy_ctrt": "-2.10", "acml_vol": "1,234,567", "shnu_cntg_qty": "300", "seln_cntg_qty": "200"}
+        with patch.object(kf, "_get", return_value={"output": out}):
+            rt = kf.fetch_realtime("005930")
+        self.assertEqual(-1500, rt["change"])
+        self.assertEqual(-2.1, rt["change_pct"])
+        self.assertEqual(1_234_567, rt["volume"])
+        self.assertEqual(150.0, rt["cttr"])
+        self.assertEqual(12.5, rt["per"])   # 기존 필드는 그대로
+
+    def test_realtime_cttr_none_when_missing(self):
+        with patch.object(kf, "_get", return_value={"output": {"stck_prpr": "100"}}):
+            rt = kf.fetch_realtime("005930")
+        self.assertIsNone(rt["cttr"])
+        self.assertIsNone(rt["change"])
+
+    def test_orderbook(self):
+        out = {"askp1": "70,100", "bidp1": "70,000", "askp_rsqn1": "10", "bidp_rsqn1": "20",
+               "total_askp_rsqn": "1000", "total_bidp_rsqn": "1800"}
+        with patch.object(kf, "_get", return_value={"output1": out}):
+            ob = kf.fetch_orderbook("005930")
+        self.assertEqual(70_100, ob["ask1"])
+        self.assertEqual(1.8, ob["bid_ask_ratio"])
+        self.assertEqual((70_100, 10, 70_000, 20), ob["levels"][0])
+        self.assertEqual(10, len(ob["levels"]))
+
+    def test_orderbook_empty(self):
+        with patch.object(kf, "_get", return_value={"output1": {}}):
+            self.assertIsNone(kf.fetch_orderbook("005930"))
+
+
 class FormatTests(unittest.TestCase):
     def test_yoy_format(self):
         self.assertEqual("N/M", af.fmt_yoy(8118.0))

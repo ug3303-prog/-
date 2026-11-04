@@ -5,3 +5,8 @@ dart_key.json
 .dart_financials_cache.json
 __pycache__/
 *.pyc
+.krx_master_cache.json
+.price_cache/
+.last_scan.json
+gui_settings.json
+desktop.ini
