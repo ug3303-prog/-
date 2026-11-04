@@ -29,13 +29,25 @@ from tkinter import ttk, messagebox
 import kis_feed as kf
 
 # ── 신호 기준값 (GUI에서도 조절 가능) ───────────────────────────
-DEFAULT_POLL_SEC = 3          # 폴링 주기(초). 종목 수 * 2회 호출 / 주기 가 KIS 레이트리밋 이내여야 함
+DEFAULT_POLL_SEC = 3          # 폴링 주기(초). 종목 수 * 3회 호출(현재가+호가+체결강도) / 주기 가 KIS 레이트리밋 이내여야 함
 BID_ASK_RATIO_HIGH = 1.8      # 총매수잔량/총매도잔량 이 이 값 넘으면 "매수우위"
 BID_ASK_RATIO_LOW = 1 / 1.8   # 이 값 밑돌면 "매도우위"
 CTTR_HIGH = 150.0             # 체결강도 100 = 매수/매도 균형. 150 이상이면 매수 쏠림
 CTTR_LOW = 70.0                # 70 이하면 매도 쏠림
 SURGE_PCT = 1.0                # 폴링 간격 사이 가격이 이 비율(%) 이상 움직이면 급등/급락 알림
 VOLUME_SURGE_RATIO = 3.0       # 직전 폴링 대비 거래량 증가분이 이 배수 넘으면 거래량 급증 알림
+
+
+def _load_stock_names():
+    """gui.py(대장주 발굴기)가 만들어 둔 종목 마스터 캐시에서 코드→종목명을 읽는다.
+    KIS 현재가 응답엔 종목명이 없어서다. 캐시가 없으면 빈 dict(코드로 표시)."""
+    import json
+    from pathlib import Path
+    try:
+        cache = json.loads(Path(__file__).with_name(".krx_master_cache.json").read_text(encoding="utf-8"))
+        return {str(r["code"]): str(r["name"]) for r in cache.get("records", []) if r.get("code")}
+    except Exception:
+        return {}
 
 
 class Watcher:
@@ -254,9 +266,10 @@ class ScalperApp(tk.Tk):
 
         for item in self.tree.get_children():
             self.tree.delete(item)
-        self._watchers = {c: Watcher(c) for c in codes}
+        names = _load_stock_names()
+        self._watchers = {c: Watcher(c, names.get(c, "")) for c in codes}
         for c in codes:
-            self.tree.insert("", "end", iid=c, values=(c, c, "-", "-", "-", "-", ""))
+            self.tree.insert("", "end", iid=c, values=(names.get(c, c), c, "-", "-", "-", "-", ""))
 
         self._stop_requested = False
         self.btn_run.configure(state="disabled")
@@ -291,6 +304,11 @@ class ScalperApp(tk.Tk):
                     continue
                 if not rt:
                     continue
+                # 체결강도는 별도 API — 실패해도 현재가/호가 표시는 계속한다
+                try:
+                    rt["cttr"] = kf.fetch_cttr(code)
+                except Exception:
+                    rt["cttr"] = None
                 signals = watcher.update(rt, ob)
                 self._msg_queue.put(("row", code, rt, ob, signals))
                 for s in signals:

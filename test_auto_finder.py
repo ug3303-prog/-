@@ -343,20 +343,27 @@ class ScalperFeedTests(unittest.TestCase):
 
     def test_realtime_scalper_fields(self):
         out = {"stck_prpr": "70,000", "per": "12.5", "pbr": "1.1", "prdy_vrss": "1500", "prdy_vrss_sign": "5",
-               "prdy_ctrt": "-2.10", "acml_vol": "1,234,567", "shnu_cntg_qty": "300", "seln_cntg_qty": "200"}
+               "prdy_ctrt": "-2.10", "acml_vol": "1,234,567"}
         with patch.object(kf, "_get", return_value={"output": out}):
             rt = kf.fetch_realtime("005930")
         self.assertEqual(-1500, rt["change"])
         self.assertEqual(-2.1, rt["change_pct"])
         self.assertEqual(1_234_567, rt["volume"])
-        self.assertEqual(150.0, rt["cttr"])
         self.assertEqual(12.5, rt["per"])   # 기존 필드는 그대로
 
-    def test_realtime_cttr_none_when_missing(self):
-        with patch.object(kf, "_get", return_value={"output": {"stck_prpr": "100"}}):
-            rt = kf.fetch_realtime("005930")
-        self.assertIsNone(rt["cttr"])
-        self.assertIsNone(rt["change"])
+    def test_cttr_from_inquire_ccnl(self):
+        # 주식현재가 체결 API: output은 최근 체결순 배열, tday_rltv = 당일 체결강도
+        body = {"output": [{"stck_cntg_hour": "101500", "tday_rltv": "123.45"},
+                           {"stck_cntg_hour": "101459", "tday_rltv": "120.00"}]}
+        with patch.object(kf, "_get", return_value=body) as g:
+            self.assertEqual(123.45, kf.fetch_cttr("005930"))
+        self.assertEqual("FHKST01010300", g.call_args.kwargs["tr_id"])
+
+    def test_cttr_none_when_missing(self):
+        with patch.object(kf, "_get", return_value={"output": []}):
+            self.assertIsNone(kf.fetch_cttr("005930"))
+        with patch.object(kf, "_get", return_value={"output": [{"tday_rltv": ""}]}):
+            self.assertIsNone(kf.fetch_cttr("005930"))
 
     def test_orderbook(self):
         out = {"askp1": "70,100", "bidp1": "70,000", "askp_rsqn1": "10", "bidp_rsqn1": "20",

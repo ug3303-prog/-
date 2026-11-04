@@ -123,16 +123,16 @@
    백업: 원격 브랜치 `local-backup-1104`, PC 폴더 `대장주_스윙_백업_1104`.
    정리(삭제)는 사용자 판단에 맡김 — 임의로 지우라고 하지 말 것.
    **이 저장소는 public이다** — 키가 들어갈 수 있는 파일은 절대 커밋하지 말 것.
-3. **체결강도(`cttr`) 필드 검증 안 됨**: `kis_feed.py`의 `fetch_realtime()`에서
-   체결강도를 KIS 표준 필드(`shnu_cntg_qty`/`seln_cntg_qty`)로 직접 계산하도록
-   구현했다. 이 필드명은 일반적으로 알려진 이름이긴 하나, **실제 KIS 응답으로
-   검증된 적은 없다**(이 세션엔 KIS API에 직접 붙을 네트워크 접근이 없었음 —
-   코드는 전부 mock으로만 테스트됨). 사용자가 `scalper.py`를 처음 돌릴 때
-   체결강도 값이 이상하면(항상 None이거나 비현실적인 값) 이 필드명부터 의심할 것.
-4. **호가 API(`fetch_orderbook`)도 마찬가지로 mock 테스트만 거쳤다** — 실제
-   KIS 응답 필드명(`askp1`~`askp10`, `bidp_rsqn1`~`bidp_rsqn10`,
-   `total_askp_rsqn`/`total_bidp_rsqn`)이 맞는지 실사용 확인 필요.
-5. **`scalper.py`는 종목당 폴링 1회에 API 호출 2번**(현재가+호가)을 쓴다.
+3. **체결강도 — 2026-11-04 실사용 버그 수정**: 처음엔 현재가 응답의
+   `shnu_cntg_qty`/`seln_cntg_qty`로 계산했는데, 실사용에서 체결강도가 항상 `-`로 나옴.
+   KIS 공식 샘플(github.com/koreainvestment/open-trading-api)을 확인해보니 그런 필드는
+   없었다. **주식현재가 체결 API(inquire-ccnl, FHKST01010300)의 `tday_rltv`(당일 체결강도)**로
+   교체(`kis_feed.fetch_cttr()`). 필드명은 공식 샘플로 확인했지만 실제 응답으로 값이
+   나오는지는 사용자 재확인 필요. KIS 필드를 새로 쓸 땐 추측하지 말고 이 공식 샘플
+   저장소(`examples_llm/domestic_stock/*/chk_*.py`의 COLUMN_MAPPING)부터 볼 것.
+4. **호가 API(`fetch_orderbook`)는 실사용 확인됨** — 2026-11-04 코웨이로 호가매수/매도비
+   0.85 정상 표시. 필드명도 공식 샘플과 일치.
+5. **`scalper.py`는 종목당 폴링 1회에 API 호출 3번**(현재가+호가+체결강도)을 쓴다.
    워치리스트가 크면 폴링 주기 안에 못 끝나거나 레이트리밋에 걸릴 수 있음 —
    README에 5~10종목 권장이라고 적어뒀다.
 6. **DART 계정명 매칭이 완벽하지 않을 수 있음** — `_ACCOUNT_ALIASES`에 흔한
@@ -153,7 +153,7 @@
 
 ## 다음에 할 만한 작업 후보 (요청받은 적은 없음, 참고용)
 
-- `scalper.py`의 체결강도/호가 필드명을 실사용자 피드백으로 검증
+- `scalper.py`의 체결강도(`tday_rltv`) 값이 실제로 나오는지 사용자 재확인
 - `gui.py`/`scalper.py`의 조건값들을 설정 파일로 분리해 재사용성 높이기
 - DART 재무제표 API 호출 실패 시 사유를 로그에 더 자세히 남기기
 

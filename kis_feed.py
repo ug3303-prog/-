@@ -411,11 +411,7 @@ def fetch_realtime(code6: str):
         risk.append("정리매매")
 
     # 아래는 scalper.py(초단타 모니터링)용 — 같은 응답에서 추가 호출 없이 뽑는다.
-    # ⚠️ shnu_cntg_qty/seln_cntg_qty 필드명은 실제 KIS 응답으로 검증된 적 없음(HANDOFF 참고).
-    buy_qty = _i(out.get("shnu_cntg_qty"))
-    sell_qty = _i(out.get("seln_cntg_qty"))
-    cttr = (buy_qty / sell_qty * 100) if (buy_qty is not None and sell_qty) else None
-
+    # (체결강도는 이 응답에 없다 — fetch_cttr() 참고)
     sign = _i(out.get("prdy_vrss_sign"), 0)  # 1,2=상승 4,5=하락 3=보합
     change = _i(out.get("prdy_vrss"))
     if change is not None and sign in (4, 5) and change > 0:
@@ -431,10 +427,30 @@ def fetch_realtime(code6: str):
         "change": change,                      # 전일대비(부호 있음)
         "change_pct": _f(out.get("prdy_ctrt")),  # 등락률(%)
         "volume": _i(out.get("acml_vol")),     # 누적거래량
-        "buy_cntg_qty": buy_qty,               # 누적 매수체결량
-        "sell_cntg_qty": sell_qty,             # 누적 매도체결량
-        "cttr": cttr,                          # 체결강도(%) — 100 넘으면 매수우위
     }
+
+
+def fetch_cttr(code6: str):
+    """
+    당일 체결강도(%) — 100 넘으면 매수체결 우위. scalper.py용.
+    [국내주식] 주식현재가 체결(inquire-ccnl, FHKST01010300)의 tday_rltv 필드.
+    현재가 조회(inquire-price) 응답엔 체결강도가 없어서 별도 호출이 필요하다
+    (2026-11-04 실사용에서 '-'만 나와 KIS 공식 샘플 코드로 필드 확인 후 교체).
+    output은 최근 체결순 배열이라 첫 행의 값을 쓴다. 없으면 None.
+    """
+    j = _get(
+        "/uapi/domestic-stock/v1/quotations/inquire-ccnl",
+        tr_id="FHKST01010300",
+        params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code6},
+    )
+    rows = (j or {}).get("output") or []
+    if isinstance(rows, dict):
+        rows = [rows]
+    for r in rows:
+        v = _f(r.get("tday_rltv"))
+        if v is not None:
+            return v
+    return None
 
 
 def fetch_investor_flow(code6: str, days: int = 5):
@@ -479,7 +495,8 @@ def fetch_investor_flow(code6: str, days: int = 5):
 def fetch_orderbook(code6: str):
     """
     실시간 호가(매수/매도 1~10단계 잔량) 조회 — scalper.py용.
-    ⚠️ askp/askp_rsqn/bidp/bidp_rsqn/total_*_rsqn 필드명은 실제 KIS 응답으로 검증된 적 없음.
+    필드명은 KIS 공식 샘플(inquire_asking_price_exp_ccn)과 대조했고, 2026-11-04 실사용에서
+    호가매수/매도비가 정상 표시되는 것 확인.
     반환: {
       "ask1": int, "bid1": int,                    # 매도1호가/매수1호가
       "total_ask_qty": int, "total_bid_qty": int,  # 총 매도/매수 잔량
