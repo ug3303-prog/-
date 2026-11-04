@@ -115,12 +115,13 @@
 1. **보안**: 사용자의 작업 폴더가 OneDrive 동기화 폴더 안에 있다. `kis_keys.json`
    등은 평문 저장이라 OneDrive로 그대로 업로드된다. README에 경고는 적어뒀지만
    폴더를 옮기라고 강제하진 않았다 — 사용자가 선택할 문제.
-2. **사용자 PC 동기화 (2026-11-04 진행 중)**: PC에서 `local-backup-1104` 브랜치를
-   만들어 수정본을 push했고, 통합 커밋은 `claude/amazing-rubin-w62q9y`에 있다.
-   PC를 이 브랜치로 맞추는 안내를 했음 — 다음 세션에서 사용자 PC의 `git log -1`이
-   통합 커밋(또는 이후)인지 확인할 것. PC의 `kis_keys.example.json` 로컬 수정분은
-   커밋하지 않았다(키가 있을 수 있어서). 예전 `stash@{0}`(926ec8f 기준 수정본)은
-   백업 브랜치와 내용이 같으니 사용자 확인 후 지워도 됨 — 임의로 drop하지 말 것.
+2. **사용자 PC 동기화 — 2026-11-04 완료**: PC가 `claude/amazing-rubin-w62q9y`의
+   통합 커밋(`d7a3847`)과 일치함을 `git status`로 확인. 남은 로컬 상태:
+   `kis_keys.example.json` 수정분(키가 있을 수 있어 일부러 커밋 안 함),
+   untracked `auto_finder_fixed.zip`·`gitignore`(점 없는 옛 파일)·투자 판단 기준 메모 txt
+   (사용자 개인 메모 — 건드리지 말 것), 예전 `stash@{0}`(백업 브랜치와 같은 내용).
+   백업: 원격 브랜치 `local-backup-1104`, PC 폴더 `대장주_스윙_백업_1104`.
+   정리(삭제)는 사용자 판단에 맡김 — 임의로 지우라고 하지 말 것.
    **이 저장소는 public이다** — 키가 들어갈 수 있는 파일은 절대 커밋하지 말 것.
 3. **체결강도(`cttr`) 필드 검증 안 됨**: `kis_feed.py`의 `fetch_realtime()`에서
    체결강도를 KIS 표준 필드(`shnu_cntg_qty`/`seln_cntg_qty`)로 직접 계산하도록
