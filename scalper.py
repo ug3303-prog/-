@@ -152,9 +152,11 @@ class Watcher:
 
 
 class ScalperApp(tk.Tk):
+    BASE_TITLE = "초단타 모니터링 (신호 전용 — 자동매매 아님)"
+
     def __init__(self):
         super().__init__()
-        self.title("초단타 모니터링 (신호 전용 — 자동매매 아님)")
+        self.title(self.BASE_TITLE)
         self.geometry("980x640")
         self.minsize(820, 520)
 
@@ -487,6 +489,7 @@ class ScalperApp(tk.Tk):
                 direction = _signal_direction(signals)
                 if direction and price:
                     self._msg_queue.put(("verify_new", code, watcher.name, price, direction, time.time()))
+                    self._msg_queue.put(("alert", watcher.name or code, signals))
 
             elapsed = time.time() - t0
             wait = max(0.0, poll_sec - elapsed)
@@ -515,6 +518,9 @@ class ScalperApp(tk.Tk):
                         "code": code, "name": name or code, "price": price,
                         "direction": direction, "time": t, "done": set(),
                     })
+                elif kind == "alert":
+                    _, name, labels = item
+                    self._notify_composite(name, labels)
                 elif kind == "error":
                     messagebox.showerror("오류", item[1])
                     self._finish()
@@ -528,6 +534,26 @@ class ScalperApp(tk.Tk):
     def _finish(self):
         self.btn_run.configure(state="normal")
         self.btn_stop.configure(state="disabled")
+
+    # ── 복합신호 알림 (소리 + 창 깜빡임) ────────────────────
+    def _notify_composite(self, name, labels):
+        try:
+            self.bell()  # 기본 시스템 알림음(크로스플랫폼)
+        except Exception:
+            pass
+        try:
+            import winsound
+            winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)  # 윈도우는 좀 더 눈에 띄는 소리로
+        except Exception:
+            pass
+        try:
+            self.lift()
+            self.attributes("-topmost", True)
+            self.after(800, lambda: self.attributes("-topmost", False))
+        except Exception:
+            pass
+        self.title(f"🔥 복합신호: {name} — {self.BASE_TITLE}")
+        self.after(8000, lambda: self.title(self.BASE_TITLE))
 
     # ── 신호 적중 검증 ───────────────────────────────────────
     def _check_verifications(self):
