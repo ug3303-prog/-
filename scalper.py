@@ -157,8 +157,8 @@ class ScalperApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(self.BASE_TITLE)
-        self.geometry("980x640")
-        self.minsize(820, 520)
+        self.geometry("1000x880")
+        self.minsize(900, 700)
 
         self._watchers: dict[str, Watcher] = {}
         self._poll_thread = None
@@ -231,7 +231,7 @@ class ScalperApp(tk.Tk):
             "name": "종목명", "code": "코드", "price": "현재가", "change_pct": "등락률(%)",
             "cttr": "체결강도", "bid_ask_ratio": "호가매수/매도비", "signals": "신호",
         }
-        self.tree = ttk.Treeview(table_frame, columns=cols, show="headings", height=14)
+        self.tree = ttk.Treeview(table_frame, columns=cols, show="headings", height=9)
         for c in cols:
             self.tree.heading(c, text=headers[c])
             self.tree.column(c, width=110, anchor="center")
@@ -285,13 +285,13 @@ class ScalperApp(tk.Tk):
         )
 
         log_frame = ttk.LabelFrame(self, text="신호 알림 로그 / 적중 검증")
-        log_frame.pack(fill="both", **pad)
+        log_frame.pack(fill="both", expand=True, **pad)
         self.lbl_stats = ttk.Label(
             log_frame, text="복합신호 적중률(3분 기준): 아직 데이터 없음",
             font=("TkDefaultFont", 15, "bold"),
         )
         self.lbl_stats.pack(fill="x", padx=6, pady=(8, 6))
-        self.txt_log = tk.Text(log_frame, height=7, state="disabled")
+        self.txt_log = tk.Text(log_frame, height=10, state="disabled")
         self.txt_log.pack(fill="both", expand=True, padx=4, pady=4)
 
     # ── 키 저장/로딩 ─────────────────────────────────────────
