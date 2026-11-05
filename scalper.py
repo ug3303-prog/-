@@ -286,8 +286,11 @@ class ScalperApp(tk.Tk):
 
         log_frame = ttk.LabelFrame(self, text="신호 알림 로그 / 적중 검증")
         log_frame.pack(fill="both", **pad)
-        self.lbl_stats = ttk.Label(log_frame, text="복합신호 적중률(3분 기준): 아직 데이터 없음")
-        self.lbl_stats.pack(fill="x", padx=4, pady=(4, 0))
+        self.lbl_stats = ttk.Label(
+            log_frame, text="복합신호 적중률(3분 기준): 아직 데이터 없음",
+            font=("TkDefaultFont", 15, "bold"),
+        )
+        self.lbl_stats.pack(fill="x", padx=6, pady=(8, 6))
         self.txt_log = tk.Text(log_frame, height=7, state="disabled")
         self.txt_log.pack(fill="both", expand=True, padx=4, pady=4)
 
@@ -594,10 +597,15 @@ class ScalperApp(tk.Tk):
         total, hit = self._verify_stats["total"], self._verify_stats["hit"]
         if total == 0:
             self.lbl_stats.configure(text="복합신호 적중률(3분 기준): 아직 데이터 없음")
-        else:
-            self.lbl_stats.configure(
-                text=f"복합신호 적중률(3분 기준): {hit}/{total} ({hit/total*100:.0f}%)"
-            )
+            return
+        rate = hit / total * 100
+        # 50%는 동전 던지기랑 같음 — 그 밑이면 신호가 방향을 맞히는 게 아니라
+        # 오히려 틀리는 쪽에 가깝다는 뜻이라 빨간색으로 분명히 보여준다.
+        color = "#c0392b" if rate < 40 else ("#b8860b" if rate < 55 else "#1e7e34")
+        self.lbl_stats.configure(
+            text=f"복합신호 적중률(3분 기준): {hit}/{total} ({rate:.0f}%)",
+            foreground=color,
+        )
 
     def _log_verification_csv(self, v, horizon, cur_price, change_pct, hit):
         """horizon=0 은 '신호가 떴다'는 발생 기록(결과 미정 — 적중 칸 '-'),
