@@ -341,16 +341,26 @@ class ScalperApp(tk.Tk):
         return qty, stop_price, target_price, max_loss, max_gain
 
     # ── 포지션 추적 ──────────────────────────────────────────
-    def _register_position_from_calc(self):
+    def _selected_or_single_code(self):
+        """실시간 현황 표에서 클릭해 선택한 종목이 있으면 그걸 쓰고,
+        없으면(선택 안 함) 워치리스트에 종목이 정확히 1개일 때만 그걸 쓴다."""
+        sel = self.tree.selection()
+        if len(sel) == 1:
+            return sel[0]
         codes = [c.strip().zfill(6) for c in self.var_codes.get().split(",") if c.strip()]
-        if len(codes) != 1:
+        if len(codes) == 1:
+            return codes[0]
+        return None
+
+    def _register_position_from_calc(self):
+        code = self._selected_or_single_code()
+        if not code:
             messagebox.showwarning(
                 "종목 특정 필요",
-                "워치리스트에 종목을 정확히 1개만 입력한 상태에서 눌러주세요.\n"
-                "(여러 종목이면 어떤 종목 포지션인지 특정할 수 없습니다)",
+                "실시간 현황 표에서 종목을 1개 클릭해 선택하거나,\n"
+                "워치리스트에 종목을 정확히 1개만 입력한 상태에서 눌러주세요.",
             )
             return
-        code = codes[0]
         result = self._compute_position()
         if not result:
             messagebox.showwarning("입력 필요", "매수가를 입력하세요.")
@@ -363,8 +373,9 @@ class ScalperApp(tk.Tk):
         }
         if code not in self._watchers:
             self._watchers[code] = Watcher(code, _load_stock_names().get(code, ""))
+        name = self._watchers[code].name or code
         self._refresh_position_row(code)
-        self._append_log(f"[포지션 등록] {code} 매수가 {entry:,} · 손절 {stop_price:,} · 목표 {target_price:,}")
+        self._append_log(f"[포지션 등록] {name}({code}) 매수가 {entry:,} · 손절 {stop_price:,} · 목표 {target_price:,}")
 
     def _remove_selected_position(self):
         for iid in self.pos_tree.selection():
