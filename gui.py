@@ -142,6 +142,7 @@ class ScannerApp(tk.Tk):
         result_frame.rowconfigure(0, weight=2)
         result_frame.rowconfigure(1, weight=4)
         result_frame.rowconfigure(2, weight=3)
+        result_frame.rowconfigure(3, weight=2)
         result_frame.columnconfigure(0, weight=1)
 
         picks_box = ttk.LabelFrame(result_frame, text="⭐ 추천 후보 3종목 — 조건 점수 기준(매수 권유 아님)")
@@ -153,8 +154,15 @@ class ScannerApp(tk.Tk):
         self.tree_hits = self._make_tree(hits_box, height=8)
 
         knives_box = ttk.LabelFrame(result_frame, text="⚠️ 칼날 주의 — 눌림은 왔지만 하락추세(200일선 아래)")
-        knives_box.grid(row=2, column=0, sticky="nsew", pady=(4, 0))
+        knives_box.grid(row=2, column=0, sticky="nsew", pady=4)
         self.tree_knives = self._make_tree(knives_box, height=5)
+
+        bounce_box = ttk.LabelFrame(
+            result_frame,
+            text="⚡ 단타 반등 후보 — 칼날주의 중(여전히 하락추세, 초단기·고위험, 매수 권유 아님)",
+        )
+        bounce_box.grid(row=3, column=0, sticky="nsew", pady=(4, 0))
+        self.tree_bounce = self._make_pick_tree(bounce_box, height=3)
 
         # 로그
         log_frame = ttk.LabelFrame(self, text="로그")
@@ -347,7 +355,7 @@ class ScannerApp(tk.Tk):
 
         self._save_settings()
 
-        for tree in (self.tree_picks, self.tree_hits, self.tree_knives):
+        for tree in (self.tree_picks, self.tree_hits, self.tree_knives, self.tree_bounce):
             for item in tree.get_children():
                 tree.delete(item)
         self._set_log("")
@@ -413,14 +421,18 @@ class ScannerApp(tk.Tk):
         elif kind == "done":
             res: af.ScanResult = item[1]
             self._last_result = res
-            self._fill_picks(res.picks)
+            self._fill_picks(self.tree_picks, res.picks, "눌림 7~20%, 200일선 상승, 거래량 과열 아님, 흑자 등")
             self._fill_tree(self.tree_hits, res.hits)
             self._fill_tree(self.tree_knives, res.knives)
-            self.btn_export.configure(state="normal" if (res.hits or res.knives or res.picks) else "disabled")
+            self._fill_picks(self.tree_bounce, res.bounce_picks,
+                              "낙폭 15~45%, 200일선 대비 -3~-35%, 과열(4배↑) 아님, 흑자 등")
+            self.btn_export.configure(
+                state="normal" if (res.hits or res.knives or res.picks or res.bounce_picks) else "disabled"
+            )
             tail = " (중단됨)" if res.stopped else ""
             self.lbl_progress.configure(
                 text=f"완료{tail} — 조회 {res.scanned}/{res.universe_len}, 충족 {len(res.hits)}, "
-                     f"칼날 {len(res.knives)}, 추천 {len(res.picks)}")
+                     f"칼날 {len(res.knives)}, 추천 {len(res.picks)}, 단타후보 {len(res.bounce_picks)}")
             notes = []
             if res.intraday:
                 notes.append("⚠ 장중 데이터: 거래량비·거래대금·이동평균은 직전 거래일까지 기준")
@@ -467,15 +479,14 @@ class ScannerApp(tk.Tk):
         for c in rows[:limit]:
             tree.insert("", "end", values=self._cand_values(c))
 
-    def _fill_picks(self, picks):
-        for item in self.tree_picks.get_children():
-            self.tree_picks.delete(item)
+    def _fill_picks(self, tree, picks, empty_hint):
+        for item in tree.get_children():
+            tree.delete(item)
         if not picks:
-            self.tree_picks.insert("", "end", values=("-", "추천 기준을 모두 통과한 종목이 없습니다", "", "", "", "", "", "",
-                                                      "눌림 7~20%, 200일선 상승, 거래량 과열 아님, 흑자 등"))
+            tree.insert("", "end", values=("-", "기준을 통과한 종목이 없습니다", "", "", "", "", "", "", empty_hint))
             return
         for i, c in enumerate(picks, 1):
-            self.tree_picks.insert("", "end", values=(
+            tree.insert("", "end", values=(
                 i, c.name, c.code, c.sector or "-", f"{c.price:,}", f"{c.pullback:.1f}", f"{c.above_ma:.1f}",
                 f"{c.score:.0f}", " · ".join(c.reasons)))
 
@@ -495,7 +506,7 @@ class ScannerApp(tk.Tk):
     # ── CSV ─────────────────────────────────────────────────
     def _export_csv(self):
         res = self._last_result
-        if not res or not (res.hits or res.knives or res.picks):
+        if not res or not (res.hits or res.knives or res.picks or res.bounce_picks):
             return
         path = filedialog.asksaveasfilename(
             defaultextension=".csv", filetypes=[("CSV", "*.csv")], initialfile="auto_finder_result.csv"
@@ -526,6 +537,8 @@ class ScannerApp(tk.Tk):
                     _row("충족", c)
                 for c in res.knives:
                     _row("칼날주의", c)
+                for c in res.bounce_picks:
+                    _row("단타후보", c)
         except OSError as e:
             messagebox.showerror("저장 실패", f"파일을 저장하지 못했습니다(다른 프로그램에서 열려 있을 수 있어요):\n{e}")
             return

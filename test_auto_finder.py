@@ -169,6 +169,52 @@ class PickTests(unittest.TestCase):
         self.assertEqual({"B", "C", "D"}, {p.name for p in picks})
 
 
+# ───────────────────────── 단타 반등 후보(칼날주의) ─────────────────────────
+def knife_cand(code, name, sector, **kw):
+    """칼날주의(200일선 아래) 기본값의 Candidate. above_ma는 음수여야 한다."""
+    base = dict(name=name, code=code, mcap=50_000, price=10_000, pullback=20.0, above_ma=-10.0,
+                trade_value=200.0, vol_ratio=2.0, ma_slope=-1.0, sector=sector, per=10.0, pbr=1.0)
+    base.update(kw)
+    return af.Candidate(**base)
+
+
+class BounceTests(unittest.TestCase):
+    def test_hard_filters(self):
+        self.assertFalse(af.bounce_eligibility(knife_cand("1", "적자", "A", per=None, per_loss=True))[0])
+        self.assertFalse(af.bounce_eligibility(knife_cand("2", "덜빠짐", "A", pullback=10.0))[0])
+        self.assertFalse(af.bounce_eligibility(knife_cand("3", "구조붕괴", "A", pullback=50.0))[0])
+        self.assertFalse(af.bounce_eligibility(knife_cand("4", "MA근접", "A", above_ma=-1.0))[0])
+        self.assertFalse(af.bounce_eligibility(knife_cand("5", "MA과다이탈", "A", above_ma=-40.0))[0])
+        self.assertFalse(af.bounce_eligibility(knife_cand("6", "패닉거래량", "A", vol_ratio=5.0))[0])
+        self.assertFalse(af.bounce_eligibility(knife_cand("7", "영업적자", "A", op_positive=False))[0])
+        self.assertFalse(af.bounce_eligibility(
+            knife_cand("8", "수급이탈", "A", flow_foreign=-10.0, flow_orgn=-5.0, flow_unit="억"))[0])
+        self.assertTrue(af.bounce_eligibility(knife_cand("9", "정상", "A"))[0])
+
+    def test_returns_three_with_distinct_sectors(self):
+        cands = [
+            knife_cand("1", "A1", "반도체", pullback=20, per_rel=-20),
+            knife_cand("2", "A2", "반도체", pullback=22, per_rel=-25),
+            knife_cand("3", "B1", "자동차", pullback=18, per_rel=-10),
+            knife_cand("4", "C1", "화학", pullback=25, per_rel=0),
+            knife_cand("5", "D1", "은행", pullback=5),            # 탈락(낙폭 부족)
+        ]
+        picks = af.bounce_pick_top(cands, n=3)
+        self.assertEqual(3, len(picks))
+        self.assertEqual(3, len({p.sector for p in picks}))
+        self.assertNotIn("D1", [p.name for p in picks])
+        self.assertTrue(all(p.score is not None and p.reasons for p in picks))
+
+    def test_higher_volume_ratio_scores_better_than_swing(self):
+        """스윙(score_candidate)은 거래량 과열을 감점하지만, 반등후보는 어느 정도까지는
+        가점으로 뒤집는다는 설계 의도를 확인한다."""
+        low_vol = knife_cand("1", "저거래량", "A", vol_ratio=0.3)
+        mid_vol = knife_cand("2", "중거래량", "A", vol_ratio=2.0)
+        s_low, _ = af.score_bounce_candidate(low_vol)
+        s_mid, _ = af.score_bounce_candidate(mid_vol)
+        self.assertGreater(s_mid, s_low)
+
+
 # ───────────────────────── DART ─────────────────────────
 class DartMetricsTests(unittest.TestCase):
     def rows(self):

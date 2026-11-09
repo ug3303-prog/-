@@ -56,6 +56,17 @@ PICK_MAX_ABOVE_MA = 60.0   # 너무 멀면 추격 부담
 PICK_MAX_VOL_RATIO = 2.5   # 거래량이 평소의 2.5배 넘으면 뭔가 터진 것
 MA_SLOPE_DAYS = 20         # 이동평균 기울기 비교 기간(거래일)
 
+# ── 단타 반등 후보(칼날주의 중) 하드 필터 / 점수 기준 ─────────────
+# 칼날주의는 200일선 '아래'(하락추세)라 스윙 추천과는 성격이 완전히 다르다.
+# 여기서 뽑는 건 "짧게 치고 빠지는" 초단기 반등 트레이드 후보일 뿐, 추세 전환 확인 전까지는
+# 여전히 하락추세 종목이라는 걸 전제로 한다 — 스윙 추천과 절대 같은 신뢰도로 보면 안 됨.
+BOUNCE_PICK_N         = 3
+BOUNCE_MIN_PULLBACK   = 15.0   # 이보다 덜 빠졌으면 '과매도 반등' 기대하기엔 이름
+BOUNCE_MAX_PULLBACK   = 45.0   # 이보다 더 빠졌으면 반등이 아니라 구조적 붕괴 의심
+BOUNCE_MIN_BELOW_MA   = -35.0  # 200일선 대비 이보다 더 멀리 떨어지면 추세 복귀 자체가 비현실적
+BOUNCE_MAX_BELOW_MA   = -3.0   # 최소 -3%는 빠져야 '칼날'(그 안쪽은 추세 충돌 애매 구간)
+BOUNCE_MAX_VOL_RATIO  = 4.0    # 이보다 과열되면 패닉 매도/뉴스 쇼크일 가능성 — 반등보다 추가 급락 위험
+
 _BASE_DIR = Path(__file__).parent
 _MASTER_CACHE = _BASE_DIR / ".krx_master_cache.json"
 _PRICE_CACHE_DIR = _BASE_DIR / ".price_cache"
@@ -121,6 +132,7 @@ class ScanResult:
     picks: list
     scanned: int
     universe_len: int
+    bounce_picks: list = field(default_factory=list)   # 칼날주의 중 단타 반등 후보(고위험)
     skipped_short_history: int = 0
     skipped_risk: int = 0
     intraday: bool = False
@@ -649,6 +661,116 @@ def pick_top(cands, n: int = PICK_N, flow_fn=None, log_cb=None):
     return _select_diverse(pool, n)
 
 
+def bounce_eligibility(c: Candidate):
+    """단타 반등 후보(칼날주의 중)가 될 수 있는지. 반환 (가능 여부, 탈락 사유).
+    knives는 전부 200일선 아래(하락추세)라는 전제 자체가 스윙 추천과 다르다 —
+    여기 통과해도 '추세 전환'이 아니라 '단기 과매도 반등 가능성'일 뿐이다."""
+    if c.per_loss:
+        return False, "적자(PER 없음) — 반등보다 추가 하락 리스크"
+    if c.op_positive is False:
+        return False, "영업적자"
+    if not (BOUNCE_MIN_PULLBACK <= c.pullback <= BOUNCE_MAX_PULLBACK):
+        return False, f"눌림 {c.pullback:.1f}%가 반등 후보 구간({BOUNCE_MIN_PULLBACK:.0f}~{BOUNCE_MAX_PULLBACK:.0f}%) 밖"
+    if not (BOUNCE_MIN_BELOW_MA <= c.above_ma <= BOUNCE_MAX_BELOW_MA):
+        return False, f"200일선 대비 {c.above_ma:.1f}%가 반등 후보 구간 밖"
+    if c.vol_ratio and c.vol_ratio > BOUNCE_MAX_VOL_RATIO:
+        return False, f"거래량 {c.vol_ratio:.1f}배 과열(패닉 매도 의심)"
+    if c.flow_foreign is not None and c.flow_orgn is not None and c.flow_foreign < 0 and c.flow_orgn < 0:
+        return False, "외국인·기관 동반 순매도"
+    return True, ""
+
+
+def score_bounce_candidate(c: Candidate):
+    """0~100점과 선정 이유. 배점: 낙폭 25 / 200일선과 거리 15 / 거래량 쏠림(반등신호) 20 /
+    밸류 15 / 재무 10 / 수급 15. 스윙(score_candidate)과 달리 '추세'가 없으므로 그 자리를
+    거래량(반등 조짐)과 수급에 더 배분했다."""
+    s = 0.0
+    why = []
+
+    s += _trap(c.pullback, 10, 15, 30, 45, 25)
+    why.append(f"20일 고점 대비 -{c.pullback:.1f}% 급락")
+
+    dist = abs(c.above_ma)
+    s += _trap(dist, 3, 8, 25, 40, 15)
+    why.append(f"200일선 대비 {c.above_ma:.1f}% (과매도 구간)")
+
+    # 스윙은 거래량 과열을 감점하지만, 반등 후보는 어느 정도 거래량이 붙어야
+    # '단순 하락'이 아니라 '바닥 다지기/반등 시도'로 볼 여지가 있어 가점으로 뒤집는다.
+    s += _trap(c.vol_ratio, 0.5, 1.2, 3.0, 4.0, 20)
+    if c.vol_ratio and c.vol_ratio >= 1.2:
+        why.append(f"거래량 평소 대비 {c.vol_ratio:.1f}배(반등 시도 신호)")
+
+    rel = c.per_rel if c.per_rel is not None else c.pbr_rel
+    if rel is not None:
+        s += _clamp(15 * (70 - rel) / 100, 0, 15)
+        why.append(f"업종 {'PER' if c.per_rel is not None else 'PBR'} 대비 {rel:+.0f}%")
+    else:
+        s += 7.0
+
+    fund_known = c.op_positive is not None or c.debt_ratio is not None
+    if fund_known:
+        f = 0.0
+        if (c.op_yoy is not None and c.op_yoy > 0) or c.op_turnaround:
+            f += 3
+            why.append(f"영업이익 YoY {fmt_yoy(c.op_yoy, c.op_turnaround)}")
+        if c.rev_yoy is not None and c.rev_yoy > 0:
+            f += 3
+        if c.is_financial:
+            f += 2
+        elif c.debt_ratio is not None:
+            f += 4 if c.debt_ratio <= 100 else 2 if c.debt_ratio <= 200 else 1 if c.debt_ratio <= 300 else 0
+        s += f
+    else:
+        s += 5.0
+
+    if c.flow_foreign is not None and c.flow_orgn is not None:
+        pos = (c.flow_foreign > 0) + (c.flow_orgn > 0)
+        s += {2: 15.0, 1: 9.0, 0: 4.0}[pos]
+        if pos == 2:
+            why.append("외국인·기관 5일 동반 순매수(저가매수 유입)")
+        elif c.flow_foreign > 0:
+            why.append("외국인 5일 순매수")
+        elif c.flow_orgn > 0:
+            why.append("기관 5일 순매수")
+    else:
+        s += 7.5
+
+    return round(s, 1), why
+
+
+def bounce_pick_top(cands, n: int = BOUNCE_PICK_N, flow_fn=None, log_cb=None):
+    """칼날주의 중 단타 반등 후보 n개. pick_top과 같은 구조, 기준만 반등용으로 교체."""
+    def log(msg):
+        if log_cb:
+            log_cb(msg)
+
+    pool = []
+    for c in cands:
+        ok, _why = bounce_eligibility(c)
+        if ok:
+            c.score, c.reasons = score_bounce_candidate(c)
+            pool.append(c)
+    pool.sort(key=lambda c: c.score, reverse=True)
+
+    if flow_fn and pool:
+        shortlist = pool[:max(n * 4, 10)]
+        rest = pool[len(shortlist):]
+        for c in shortlist:
+            flow_fn(c)
+        survivors = []
+        for c in shortlist:
+            ok, why = bounce_eligibility(c)
+            if ok:
+                c.score, c.reasons = score_bounce_candidate(c)
+                survivors.append(c)
+            else:
+                log(f"  [반등후보 제외] {c.name}: {why}")
+        pool = survivors + rest
+        pool.sort(key=lambda c: c.score, reverse=True)
+
+    return _select_diverse(pool, n)
+
+
 # ═════════════════════════════════════════════════════════════════
 #  직전 스캔 대비 신규/이탈
 # ═════════════════════════════════════════════════════════════════
@@ -876,12 +998,14 @@ def run_scan(
             c.flow_foreign, c.flow_orgn, c.flow_unit = f["foreign"], f["orgn"], f["unit"]
 
     picks = []
+    bounce_picks = []
     if not stopped:
         picks = pick_top(hits, n=pick_n, flow_fn=flow_fn if use_flow else None, log_cb=log)
+        bounce_picks = bounce_pick_top(knives, n=pick_n, flow_fn=flow_fn if use_flow else None, log_cb=log)
 
     # 점수 미산정(추천 자격 밖) 종목도 표에서 순서가 일관되도록 점수는 추천 대상만 갖고, 나머지는 눌림순
     hits.sort(key=lambda c: (c.score is None, -(c.score or 0), -c.pullback))
-    knives.sort(key=lambda c: c.pullback, reverse=True)
+    knives.sort(key=lambda c: (c.score is None, -(c.score or 0), -c.pullback))
 
     # 직전 스캔 대비
     exited = []
@@ -898,12 +1022,14 @@ def run_scan(
         _save_snapshot(hits)
 
     log(
-        f"스캔 완료: {scanned}개 조회 / 충족 {len(hits)}개 / 칼날주의 {len(knives)}개 / 추천 {len(picks)}개"
+        f"스캔 완료: {scanned}개 조회 / 충족 {len(hits)}개 / 칼날주의 {len(knives)}개 / "
+        f"추천 {len(picks)}개 / 단타반등후보 {len(bounce_picks)}개"
         + (f" / 상장기간 부족 제외 {skipped_short}개" if skipped_short else "")
         + (f" / 위험 플래그 제외 {skipped_risk}개" if skipped_risk else "")
     )
     return ScanResult(
-        hits=hits, knives=knives, picks=picks, scanned=scanned, universe_len=len(universe),
+        hits=hits, knives=knives, picks=picks, bounce_picks=bounce_picks,
+        scanned=scanned, universe_len=len(universe),
         skipped_short_history=skipped_short, skipped_risk=skipped_risk, intraday=intraday,
         stopped=stopped, as_of=now.strftime("%Y-%m-%d %H:%M"), exited=exited, params=params,
     )
@@ -965,6 +1091,18 @@ def main():
         print("\n" + "-" * 78)
         print(f"  ⚠️ 참고: 눌림은 왔지만 하락추세(200일선 아래) — '칼날' 주의 ({len(res.knives)}개)")
         print("  " + ", ".join(k.name for k in res.knives[:15]))
+
+    print("\n" + "=" * 78)
+    print(f"  ⚡ 단타 반등 후보 {len(res.bounce_picks)}종목 (칼날주의 중 — 여전히 하락추세, 초단기·고위험)")
+    print("=" * 78)
+    if res.bounce_picks:
+        for i, c in enumerate(res.bounce_picks, 1):
+            print(f"  {i}. {c.name} ({c.code})  [{c.sector or '업종 미확인'}]  점수 {c.score:.0f}  현재가 {c.price:,}")
+            for r in c.reasons:
+                print(f"       - {r}")
+        print("\n  ※ 추세 전환이 아니라 과매도 반등 가능성일 뿐. 스윙 추천과 같은 신뢰도로 보지 말 것.")
+    else:
+        print("  반등 후보 기준(낙폭 15~45%, 200일선 대비 -3~-35%, 과열 아님, 흑자 등)을 통과한 종목이 없습니다.")
     print("=" * 78)
 
 
