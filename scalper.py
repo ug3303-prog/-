@@ -95,6 +95,7 @@ class Watcher:
         self.last_update = None
         self._prev_delta = None
         self._active_states: set[str] = set()   # 직전 폴링에 켜져 있던 상태형 신호 종류
+        self._last_alert_direction: str | None = None  # 복합신호 알림 중복 방지(새로 뜰 때만 알림)
 
     def update(self, rt: dict, ob: dict | None):
         signals = []
@@ -501,9 +502,12 @@ class ScalperApp(tk.Tk):
 
                 price = rt.get("price")
                 direction = _signal_direction(signals)
-                if direction and price:
+                # 같은 복합신호가 계속 유지되는 동안 매 폴링마다 다시 알리면 로그/검증 큐가
+                # 똑같은 사건으로 도배된다 — 새로 뜨거나(None→방향) 방향이 바뀔 때만 알린다.
+                if direction and direction != watcher._last_alert_direction and price:
                     self._msg_queue.put(("verify_new", code, watcher.name, price, direction, time.time()))
                     self._msg_queue.put(("alert", watcher.name or code, signals))
+                watcher._last_alert_direction = direction
 
             elapsed = time.time() - t0
             wait = max(0.0, poll_sec - elapsed)
