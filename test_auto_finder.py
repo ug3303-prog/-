@@ -138,6 +138,21 @@ class PickTests(unittest.TestCase):
             cand("7", "수급이탈", "A", flow_foreign=-10.0, flow_orgn=-5.0, flow_unit="억"))[0])
         self.assertTrue(af.pick_eligibility(cand("8", "정상", "A"))[0])
 
+    def test_just_crossed_ma_is_rejected(self):
+        """2026-11-10 실사용 회귀: above_ma 3.9%(KT&G)/4.7%(DB손해보험)짜리가 추천됐다가
+        손실 — '막 돌파'는 더 이상 통과하면 안 된다(PICK_MIN_ABOVE_MA 6.0% 상향)."""
+        self.assertFalse(af.pick_eligibility(cand("1", "KT&G 재현", "A", above_ma=3.9))[0])
+        self.assertFalse(af.pick_eligibility(cand("2", "DB손해보험 재현", "A", above_ma=4.7))[0])
+        self.assertTrue(af.pick_eligibility(cand("3", "충분히위", "A", above_ma=10.0))[0])
+
+    def test_one_day_breakout_is_rejected_even_if_above_ma_is_large_enough(self):
+        """above_ma 수치만으론 '막 돌파'를 못 잡는 경우를 ma_confirm_ratio로 보완한다 —
+        오늘만 살짝 위, 최근 5일 중 하루만 200일선 위였다면 탈락해야 한다."""
+        c = cand("1", "하루만위", "A", above_ma=10.0, ma_confirm_ratio=0.2)
+        self.assertFalse(af.pick_eligibility(c)[0])
+        c2 = cand("2", "꾸준히위", "A", above_ma=10.0, ma_confirm_ratio=0.8)
+        self.assertTrue(af.pick_eligibility(c2)[0])
+
     def test_returns_three_with_distinct_sectors(self):
         cands = [
             cand("1", "A1", "반도체", pullback=12, per_rel=-20),

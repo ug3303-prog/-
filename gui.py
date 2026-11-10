@@ -170,13 +170,13 @@ class ScannerApp(tk.Tk):
         self.txt_log = tk.Text(log_frame, height=6, state="disabled")
         self.txt_log.pack(fill="both", expand=True, padx=4, pady=4)
 
-    _TREE_COLS = ("name", "code", "sector", "mcap", "price", "pullback", "above_ma", "ma_slope", "trade_value",
-                  "vol_ratio", "per", "pbr", "per_rel", "debt_ratio", "op_yoy", "rev_yoy", "op_positive",
-                  "fin_period", "flow_f", "flow_o", "score", "is_new")
+    _TREE_COLS = ("name", "code", "sector", "mcap", "price", "pullback", "above_ma", "ma_slope", "ma_confirm",
+                  "trade_value", "vol_ratio", "per", "pbr", "per_rel", "debt_ratio", "op_yoy", "rev_yoy",
+                  "op_positive", "fin_period", "flow_f", "flow_o", "score", "is_new")
     _TREE_HEADERS = {
         "name": "종목명", "code": "코드", "sector": "업종", "mcap": "시총(억)",
         "price": "현재가", "pullback": "눌림(%)", "above_ma": "200일선위(%)", "ma_slope": "200일선기울기(%)",
-        "trade_value": "평균거래대금(억)", "vol_ratio": "거래량비(배)",
+        "ma_confirm": "최근5일중MA위", "trade_value": "평균거래대금(억)", "vol_ratio": "거래량비(배)",
         "per": "PER", "pbr": "PBR", "per_rel": "업종PER대비(%)",
         "debt_ratio": "부채비율(%)", "op_yoy": "영업이익YoY(%)", "rev_yoy": "매출YoY(%)", "op_positive": "영업흑자",
         "fin_period": "재무 기준", "flow_f": "외국인5일", "flow_o": "기관5일", "score": "점수", "is_new": "변동",
@@ -461,9 +461,11 @@ class ScannerApp(tk.Tk):
             debt_s = f"{c.debt_ratio:.0f}" + ("(금융)" if c.is_financial else "")
         pos_s = {True: "흑자", False: "적자"}.get(c.op_positive, "-")
         slope_s = f"{c.ma_slope:+.1f}" if c.ma_slope is not None else "-"
+        confirm_s = f"{round(c.ma_confirm_ratio * af.MA_CONFIRM_DAYS)}/{af.MA_CONFIRM_DAYS}" \
+            if c.ma_confirm_ratio is not None else "-"
         return (
             c.name, c.code, c.sector or "-", mc, f"{c.price:,}", f"{c.pullback:.1f}", f"{c.above_ma:.1f}", slope_s,
-            f"{c.trade_value:,.0f}", f"{c.vol_ratio:.1f}", af.fmt_per(c), pbr_s, rel_s, debt_s,
+            confirm_s, f"{c.trade_value:,.0f}", f"{c.vol_ratio:.1f}", af.fmt_per(c), pbr_s, rel_s, debt_s,
             af.fmt_yoy(c.op_yoy, c.op_turnaround), af.fmt_yoy(c.rev_yoy), pos_s, c.fin_period or "-",
             af.fmt_flow(c.flow_foreign, c.flow_unit), af.fmt_flow(c.flow_orgn, c.flow_unit),
             f"{c.score:.0f}" if c.score is not None else "-", "신규" if c.is_new else "",
@@ -521,7 +523,7 @@ class ScannerApp(tk.Tk):
                 w.writerow(["# 조건"] + [f"{k}={v}" for k, v in res.params.items()])
                 w.writerow([])
                 w.writerow(["구분", "종목명", "코드", "업종", "시총(억)", "현재가", "눌림(%)", "200일선위(%)",
-                            "200일선기울기(%)", "평균거래대금(억)", "거래량비(배)", "PER", "PBR", "업종PER대비(%)",
+                            "200일선기울기(%)", "최근5일중MA위", "평균거래대금(억)", "거래량비(배)", "PER", "PBR", "업종PER대비(%)",
                             "부채비율(%)", "영업이익YoY(%)", "매출YoY(%)", "영업흑자", "재무기준",
                             "외국인5일", "기관5일", "점수", "변동", "선정이유"])
 

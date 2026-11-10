@@ -51,10 +51,15 @@ PICK_N            = 3     # 최종 추천 개수
 # ── 추천(3종목) 하드 필터 / 점수 기준 ─────────────────────────────
 PICK_MIN_PULLBACK = 7.0    # 이보다 덜 빠졌으면 '눌림'으로 보기 어려움
 PICK_MAX_PULLBACK = 20.0   # 판단 기준 문서: 20%+ 는 악재 의심
-PICK_MIN_ABOVE_MA = 3.0    # 200일선을 막 넘은 종목은 추세 전환 리스크
+# 2026-11-10: 3.0%였을 때 실사용에서 above_ma 3.9%/4.7%짜리 종목(KT&G·DB손해보험)이
+# 추천됐다가 손실 — "막 넘은" 수준은 재돌파(휩쏘) 위험이 크다는 걸 실제로 확인한 것.
+# 6.0%로 올려 더 확실히 자리잡은 상승추세만 통과시킨다.
+PICK_MIN_ABOVE_MA = 6.0    # 200일선을 막 넘은 종목은 추세 전환(휩쏘) 리스크
 PICK_MAX_ABOVE_MA = 60.0   # 너무 멀면 추격 부담
 PICK_MAX_VOL_RATIO = 2.5   # 거래량이 평소의 2.5배 넘으면 뭔가 터진 것
 MA_SLOPE_DAYS = 20         # 이동평균 기울기 비교 기간(거래일)
+MA_CONFIRM_DAYS = 5        # 최근 이 기간(거래일) 동안 200일선 위를 유지했는지 확인
+PICK_MIN_MA_CONFIRM = 0.6  # 그중 이 비율 이상 200일선 위였어야 '안정적 상승추세'로 인정
 
 # ── 단타 반등 후보(칼날주의 중) 하드 필터 / 점수 기준 ─────────────
 # 칼날주의는 200일선 '아래'(하락추세)라 스윙 추천과는 성격이 완전히 다르다.
@@ -103,6 +108,7 @@ class Candidate:
     trade_value: float            # 평균거래대금(억)
     vol_ratio: float
     ma_slope: float | None = None  # 200일선 20거래일 변화율(%)
+    ma_confirm_ratio: float | None = None  # 최근 MA_CONFIRM_DAYS일 중 200일선 위였던 비율
     sector: str = ""
     per: float | None = None
     pbr: float | None = None
@@ -489,6 +495,18 @@ def compute_metrics(daily, lookback: int, ma_period: int, intraday: bool = False
         if prev:
             ma_slope = (ma_val / prev - 1) * 100
 
+    # 오늘 하루만 200일선을 넘은 '막 돌파'인지, 최근 며칠간 꾸준히 위에 있었는지 확인.
+    # 막 돌파는 재돌파(휩쏘)로 바로 밀릴 위험이 커서, above_ma 수치만으론 못 잡는다.
+    ma_confirm_ratio = None
+    if ma_ok and len(closes) >= ma_period + MA_CONFIRM_DAYS - 1:
+        above = 0
+        for i in range(MA_CONFIRM_DAYS):
+            window = closes[i:i + ma_period]
+            ma_i = sum(window) / ma_period
+            if closes[i] > ma_i:
+                above += 1
+        ma_confirm_ratio = above / MA_CONFIRM_DAYS
+
     return {
         "high_n": high_n,
         "avg_trade_value": avg_tv,
@@ -496,6 +514,7 @@ def compute_metrics(daily, lookback: int, ma_period: int, intraday: bool = False
         "ma_ok": ma_ok,
         "ma_val": ma_val,
         "ma_slope": ma_slope,
+        "ma_confirm_ratio": ma_confirm_ratio,
         "partial": partial,
         "last_close": daily[0]["close"],
     }
@@ -543,6 +562,8 @@ def pick_eligibility(c: Candidate):
         return False, f"200일선 위 {c.above_ma:.1f}%가 추천 구간 밖"
     if c.ma_slope is not None and c.ma_slope <= 0:
         return False, "200일선이 아직 하락/횡보 중"
+    if c.ma_confirm_ratio is not None and c.ma_confirm_ratio < PICK_MIN_MA_CONFIRM:
+        return False, f"최근 {MA_CONFIRM_DAYS}일 중 200일선 위 {c.ma_confirm_ratio*100:.0f}%뿐 — 막 돌파라 휩쏘 위험"
     if c.vol_ratio and c.vol_ratio > PICK_MAX_VOL_RATIO:
         return False, f"거래량 {c.vol_ratio:.1f}배 급증"
     if c.flow_foreign is not None and c.flow_orgn is not None and c.flow_foreign < 0 and c.flow_orgn < 0:
@@ -558,12 +579,15 @@ def score_candidate(c: Candidate):
     s += _trap(c.pullback, 5, 10, 15, 20, 25)
     why.append(f"20일 고점 대비 -{c.pullback:.1f}% 조정")
 
-    trend = _trap(c.above_ma, 3, 8, 30, 60, 16)
-    slope_pts = _clamp(c.ma_slope * 2, 0, 4) if c.ma_slope is not None else 2.0
-    s += trend + slope_pts
+    trend = _trap(c.above_ma, PICK_MIN_ABOVE_MA, PICK_MIN_ABOVE_MA + 6, 30, 60, 14)
+    slope_pts = _clamp(c.ma_slope * 1.5, 0, 3) if c.ma_slope is not None else 1.5
+    confirm_pts = _clamp(c.ma_confirm_ratio * 3, 0, 3) if c.ma_confirm_ratio is not None else 1.5
+    s += trend + slope_pts + confirm_pts
     txt = f"200일선 위 +{c.above_ma:.1f}%"
     if c.ma_slope is not None and c.ma_slope > 0:
         txt += " · 200일선 상승 중"
+    if c.ma_confirm_ratio is not None and c.ma_confirm_ratio >= PICK_MIN_MA_CONFIRM:
+        txt += f" · 최근 {MA_CONFIRM_DAYS}일 중 {round(c.ma_confirm_ratio*MA_CONFIRM_DAYS)}일 200일선 위"
     why.append(txt)
 
     if c.trade_value > 0:
@@ -942,6 +966,7 @@ def run_scan(
         c = Candidate(
             name=name, code=code, mcap=mcap, price=price, pullback=pullback, above_ma=above_ma,
             trade_value=m["avg_trade_value"], vol_ratio=m["vol_ratio"], ma_slope=m["ma_slope"],
+            ma_confirm_ratio=m["ma_confirm_ratio"],
             sector=sector, per=per, pbr=pbr, per_loss=per_loss, partial_day=m["partial"],
         )
         c.is_financial = is_financial(sector, None, name)
