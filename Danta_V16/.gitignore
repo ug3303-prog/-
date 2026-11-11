@@ -1,0 +1,10 @@
+kis_config.json
+.kis_token.json
+cache_v16/
+__pycache__/
+*.xlsx
+*_settings.json
+build/
+dist/
+*.spec
+*.exe
