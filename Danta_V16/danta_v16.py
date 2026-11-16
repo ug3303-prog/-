@@ -499,6 +499,92 @@ def fetch_name(code6: str) -> str:
     return (o.get("prdt_abrv_name") or o.get("prdt_name") or "").strip()
 
 
+# ── v17.1: 코스피200 야간선물 (08:50 알람용) ─────────────────────────
+# 밤사이(18:00~익일 06:00) 야간선물이 어떻게 끝났는지 = 오늘 시초가 갭 방향의 선행 지표.
+# KIS 선물옵션 시세(FHMIF10000000)의 시장구분 CM=야간선물, F=주간 지수선물.
+# ※ 야간 조회가 비면(값 0·오류) 주간 선물(08:45 개장) 현재가로 대신하고 그렇게 표시한다.
+FUT_MASTER_URL = "https://new.real.download.dws.co.kr/common/master/fo_idx_code_mts.mst.zip"
+FUT_ALARM_HHMM = (8, 50)
+FUT_GAP_WARN = 1.0            # 야간선물 ±1%↑ 이면 갭 주의 문구
+
+
+def parse_futures_master(text: str) -> list:
+    """지수선물옵션 마스터(| 구분) → 코스피200 선물 [(단축코드, 종목명)] 근월물 먼저.
+    코스피200 선물 단축코드는 101로 시작(스프레드 401, 미니 105, 옵션 201/301 제외)."""
+    out = []
+    for line in text.splitlines():
+        p = [x.strip() for x in line.split("|")]
+        if len(p) < 4 or not p[1].startswith("101"):
+            continue
+        out.append((p[1], p[3]))
+    digits = lambda nm: "".join(ch for ch in nm if ch.isdigit())      # 'F 202612' → '202612'
+    out.sort(key=lambda x: (digits(x[1]) or "999999", x[0]))
+    return out
+
+
+def kospi200_futures_codes() -> list:
+    CACHE_DIR.mkdir(exist_ok=True)
+    cp = CACHE_DIR / f"futmaster_{datetime.now():%Y%m%d}.json"
+    if cp.exists():
+        try:
+            return [tuple(x) for x in json.loads(cp.read_text(encoding="utf-8"))]
+        except Exception:
+            pass
+    r = requests.get(FUT_MASTER_URL, timeout=30)
+    r.raise_for_status()
+    z = zipfile.ZipFile(io.BytesIO(r.content))
+    codes = parse_futures_master(z.read(z.namelist()[0]).decode("cp949", errors="replace"))
+    if codes:
+        for old in CACHE_DIR.glob("futmaster_*.json"):
+            old.unlink(missing_ok=True)
+        cp.write_text(json.dumps(codes, ensure_ascii=False), encoding="utf-8")
+    return codes
+
+
+def parse_futures_quote(o: dict) -> Optional[dict]:
+    price = _f(o.get("futs_prpr"))
+    if not price or price <= 0:
+        return None
+    diff, rate = _f(o.get("futs_prdy_vrss"), 0.0), _f(o.get("futs_prdy_ctrt"), 0.0)
+    if str(o.get("prdy_vrss_sign") or "").strip() in ("4", "5"):      # 하한·하락인데 부호 없이 오는 경우
+        diff, rate = -abs(diff), -abs(rate)
+    return {"price": price, "diff": diff, "rate": rate, "prev": _f(o.get("futs_prdy_clpr")),
+            "volume": _f(o.get("acml_vol"), 0), "name": str(o.get("hts_kor_isnm") or "").strip()}
+
+
+def fetch_futures_quote(code: str, div: str) -> Optional[dict]:
+    j = _KIS.get("/uapi/domestic-futureoption/v1/quotations/inquire-price", "FHMIF10000000",
+                 {"FID_COND_MRKT_DIV_CODE": div, "FID_INPUT_ISCD": code})
+    return parse_futures_quote(j.get("output1") or j.get("output") or {})
+
+
+def night_futures_summary() -> dict:
+    """근월물 코스피200 선물의 야간장 마감값. 반환 {"ok","source","text","rate",...}."""
+    codes = kospi200_futures_codes()
+    if not codes:
+        return {"ok": False, "text": "선물 종목코드를 못 찾음 (선물 마스터 형식 변경 가능성)"}
+    errs = []
+    for div, source in (("CM", "야간선물"), ("F", "주간선물(야간 조회 불가 — 08:45 이후 현재가)")):
+        for code, name in codes[:2]:
+            try:
+                q = fetch_futures_quote(code, div)
+            except Exception as e:
+                errs.append(f"{div}/{code}: {e}"); continue
+            if not q:
+                errs.append(f"{div}/{code}: 값 없음"); continue
+            rate = q["rate"]
+            if rate <= -FUT_GAP_WARN:
+                hint = "⚠️ 갭하락 출발 가능 — 오전 신규 진입 더 보수적으로"
+            elif rate >= FUT_GAP_WARN:
+                hint = "갭상승 출발 가능 — 시초가 추격 주의 (갭업 3%↑ 종목은 어차피 차단)"
+            else:
+                hint = "밤사이 큰 변동 없음"
+            text = (f"코스피200 {source} {q['name'] or name} ({code})\n"
+                    f"{q['price']:,.2f}  전일대비 {q['diff']:+,.2f} ({rate:+.2f}%)\n{hint}")
+            return {"ok": True, "source": source, "code": code, "text": text, "errors": errs, **q}
+    return {"ok": False, "text": "선물 시세 조회 실패 — " + " / ".join(errs[:4]), "errors": errs}
+
+
 # ── DART 악재 공시 (선택) ─────────────────────────────────────────────
 BAD_FILING_KEYWORDS = ["유상증자결정", "전환사채권발행결정", "신주인수권부사채권발행결정", "교환사채권발행결정",
                        "감자결정", "불성실공시법인지정", "관리종목지정", "상장적격성", "매매거래정지", "최대주주변경"]
@@ -2291,6 +2377,17 @@ def selftest() -> int:
     check(f"J 지수 ETF 둘 다 20일선 아래 → 신규 진입 중단: {g['desc'][:60]}", g["block"] is True)
     check("J 점심 소강·개장 30분·장외는 진입 창 아님",
           not entry_window_ok("⏸소강구간") and not entry_window_ok("❌진입금지") and entry_window_ok("✅최적단타"))
+
+    # K. v17.1 야간선물: 마스터 파싱(근월물 우선·스프레드/미니/옵션 제외) · 하락 부호 보정
+    fm = "1|101W03|KR4101W30002|F 202703|0|0|2|2001|KOSPI200\n1|101VC|KR4101VC0005|F 202612|0|0|1|2001|KOSPI200\n" \
+         "1|401VCW3|KR4401VCW300|SP 2612-2703|0|0|1|2001|KOSPI200\n1|105VC|KR4105VC0001|미니F 202612|0|0|1|2001|KOSPI200\n" \
+         "5|201VC400|KR4201VC4003|C 202612 400.0|0|400|1|2001|KOSPI200"
+    fc = parse_futures_master(fm)
+    check(f"K 선물 마스터 → 코스피200 선물만, 근월물 먼저: {fc}", [c for c, _ in fc] == ["101VC", "101W03"])
+    fq = parse_futures_quote({"futs_prpr": "512.35", "futs_prdy_vrss": "6.10", "futs_prdy_ctrt": "1.18",
+                              "prdy_vrss_sign": "5", "hts_kor_isnm": "F 202612"})
+    check(f"K 하락 부호(5)인데 양수로 온 값 → 음수 보정: {fq['diff']} {fq['rate']}", fq["diff"] == -6.10 and fq["rate"] == -1.18)
+    check("K 가격 0(야간 미지원 응답) → 값 없음 처리", parse_futures_quote({"futs_prpr": "0"}) is None)
 
     _NOW_OVERRIDE = None
     print(f"\n  자체 테스트 {'통과' if fails == 0 else f'실패 {fails}건'}")

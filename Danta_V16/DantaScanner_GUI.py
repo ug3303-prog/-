@@ -113,6 +113,7 @@ class App(tk.Tk):
         self.worker = None
         self.results, self.portfolio, self.regime = [], [], {}
         self.repeat_job = None
+        self._fut_alarm_day = None                      # 08:50 야간선물 알람을 오늘 울렸는지
         self.settings = self._load_settings()
 
         self._build_keys()
@@ -185,6 +186,9 @@ class App(tk.Tk):
         self.btn_stop.pack(side="left", padx=4)
         ttk.Button(f, text="결과 CSV 저장", command=self.save_csv).pack(side="left", padx=4)
         ttk.Button(f, text="추천 자동 채점", command=self.review).pack(side="left", padx=4)
+        ttk.Button(f, text="야간선물", command=lambda: self.check_night_futures(manual=True)).pack(side="left", padx=4)
+        self.v_futalarm = tk.BooleanVar(value=bool(self.settings.get("fut_alarm", True)))
+        ttk.Checkbutton(f, text="08:50 알람", variable=self.v_futalarm, command=self._save_settings).pack(side="left")
         ttk.Separator(f, orient="vertical").pack(side="left", fill="y", padx=6)
         ttk.Label(f, text="보유 점검").pack(side="left")
         self.v_hold = tk.StringVar(value=self.settings.get("holding", ""))
@@ -257,7 +261,8 @@ class App(tk.Tk):
 
     def _save_settings(self):
         s = {k: v.get() for k, v in self.vars.items()}
-        s.update(write_excel=self.v_excel.get(), use_rank=self.v_rank.get(), holding=self.v_hold.get())
+        s.update(write_excel=self.v_excel.get(), use_rank=self.v_rank.get(), holding=self.v_hold.get(),
+                 fut_alarm=self.v_futalarm.get())
         try:
             SETTINGS_PATH.write_text(json.dumps(s, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception:
@@ -539,6 +544,19 @@ class App(tk.Tk):
             print(f"  DART: {'연결됨' if D._DART else '키 없음 (공시 차단 꺼짐)'}")
         self._run_engine("연결 점검", job)
 
+    def check_night_futures(self, manual=False):
+        """코스피200 야간선물 마감값 조회 → 로그 + 소리 + 팝업. 스캔 중에도 따로 돈다."""
+        self.log(f"\n[{datetime.now():%H:%M:%S}] 코스피200 야간선물 조회{'' if manual else ' (08:50 알람)'}\n")
+
+        def job():
+            try:
+                D.init_feeds()
+                res = D.night_futures_summary()
+            except Exception as e:
+                res = {"ok": False, "text": f"야간선물 조회 실패: {e}"}
+            self.q.put(("alarm", res))
+        threading.Thread(target=job, daemon=True).start()
+
     def review(self):
         if not RECORD_XLSX.exists():
             messagebox.showinfo("자동 채점", "아직 기록이 없어. '엑셀 기록'을 켜고 며칠 스캔한 뒤에 눌러줘."); return
@@ -730,6 +748,21 @@ class App(tk.Tk):
                 elif kind == "error":
                     self.log("\n[오류] " + val + "\n")
                     messagebox.showerror("오류", val[-800:])
+                elif kind == "alarm":
+                    self.log("  🔔 " + val["text"].replace("\n", "\n     ") + "\n")
+                    for e in (val.get("errors") or [])[:4]:
+                        self.log(f"     (참고) {e}\n")
+                    try:
+                        import winsound
+                        winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+                    except Exception:
+                        self.bell()
+                    try:
+                        self.deiconify(); self.lift(); self.attributes("-topmost", True)
+                        self.after(1500, lambda: self.attributes("-topmost", False))
+                    except Exception:
+                        pass
+                    (messagebox.showinfo if val.get("ok") else messagebox.showwarning)("코스피200 야간선물", val["text"])
                 elif kind == "idle":
                     self.v_status.set(f"{val} 완료")
                 elif kind == "done":
@@ -753,7 +786,13 @@ class App(tk.Tk):
 
     def _tick_clock(self):
         label, desc = D.current_time_strategy()
-        self.v_clock.set(f"⏰ {datetime.now():%H:%M:%S}   {label} — {desc}")
+        now = datetime.now()
+        self.v_clock.set(f"⏰ {now:%H:%M:%S}   {label} — {desc}")
+        # 08:50~08:59 사이 평일 하루 한 번 (08:50 이후에 창을 켜도 9시 전이면 울림)
+        if (self.v_futalarm.get() and now.weekday() < 5 and self._fut_alarm_day != now.date()
+                and D.FUT_ALARM_HHMM <= (now.hour, now.minute) < (9, 0)):
+            self._fut_alarm_day = now.date()
+            self.check_night_futures()
         self.after(1000, self._tick_clock)
 
     def _on_close(self):
