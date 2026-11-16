@@ -585,6 +585,21 @@ def kospi200_futures_codes() -> list:
     return codes
 
 
+def claim_futures_alarm() -> bool:
+    """오늘 08:50 알람을 아직 아무 창도 안 울렸으면 True (단타·스윙 창을 둘 다 켜도 한 번만 울리게)."""
+    try:
+        CACHE_DIR.mkdir(exist_ok=True)
+        flag = CACHE_DIR / f"futalarm_{datetime.now():%Y%m%d}.flag"
+        if flag.exists():
+            return False
+        for old in CACHE_DIR.glob("futalarm_*.flag"):
+            old.unlink(missing_ok=True)
+        flag.write_text(datetime.now().strftime("%H:%M:%S"), encoding="utf-8")
+    except Exception:
+        pass
+    return True
+
+
 def parse_futures_quote(o: dict) -> Optional[dict]:
     price = _f(o.get("futs_prpr"))
     if not price or price <= 0:

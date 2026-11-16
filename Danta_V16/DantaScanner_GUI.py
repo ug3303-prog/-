@@ -792,7 +792,8 @@ class App(tk.Tk):
         if (self.v_futalarm.get() and now.weekday() < 5 and self._fut_alarm_day != now.date()
                 and D.FUT_ALARM_HHMM <= (now.hour, now.minute) < (9, 0)):
             self._fut_alarm_day = now.date()
-            self.check_night_futures()
+            if D.claim_futures_alarm():                 # 스윙 창이 먼저 울렸으면 건너뜀
+                self.check_night_futures()
         self.after(1000, self._tick_clock)
 
     def _on_close(self):

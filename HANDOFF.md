@@ -386,6 +386,13 @@ HTS와 대조해 알려주기로 함 — 로그에 (참고) 줄로 실패 사유
 코드별 오류와 마스터 앞 3행을 찍는다 → 다음엔 그 캡처로 형식을 확정할 것.
 여전히 KIS 실접속 미검증.
 
+### 2026-11-16(3차) — 야간선물 알람을 스윙 창에도 추가
+
+`SwingScanner_GUI.py`에도 [야간선물] 버튼·[08:50 알람] 체크 추가(설정
+`swing_settings.json`의 `fut_alarm`). 두 창을 같이 켜도 한 번만 울리게
+`danta_v16.claim_futures_alarm()`(cache_v16/futalarm_YYYYMMDD.flag)로 조율.
+조회 로직은 단타와 같은 `night_futures_summary()` — 실접속 미검증 상태 동일.
+
 ## 톤/운영 원칙 (사용자 선호)
 
 - 사용자는 반말(존대말 없이) 응답을 선호한다고 명시함

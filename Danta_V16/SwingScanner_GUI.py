@@ -107,6 +107,7 @@ class App(tk.Tk):
         self.stop_event = threading.Event()
         self.worker = None
         self.results, self.portfolio, self.regime = [], [], {}
+        self._fut_alarm_day = None                      # 08:50 야간선물 알람을 오늘 울렸는지
         self.settings = self._load_settings()
 
         self._build_keys()
@@ -174,6 +175,9 @@ class App(tk.Tk):
         self.btn_stop = ttk.Button(f, text="■ 중단", command=self.stop_scan, state="disabled", width=8)
         self.btn_stop.pack(side="left", padx=4)
         ttk.Button(f, text="결과 CSV 저장", command=self.save_csv).pack(side="left", padx=4)
+        ttk.Button(f, text="야간선물", command=lambda: self.check_night_futures(manual=True)).pack(side="left", padx=4)
+        self.v_futalarm = tk.BooleanVar(value=bool(self.settings.get("fut_alarm", True)))
+        ttk.Checkbutton(f, text="08:50 알람", variable=self.v_futalarm, command=self._save_settings).pack(side="left")
         self.progress = ttk.Progressbar(f, mode="determinate", style="green.Horizontal.TProgressbar")
         self.progress.pack(side="left", fill="x", expand=True, padx=10)
         self.v_status = tk.StringVar(value="대기")
@@ -242,6 +246,7 @@ class App(tk.Tk):
     def _save_settings(self):
         s = {k: v.get() for k, v in self.vars.items()}
         s["write_excel"] = self.v_excel.get()
+        s["fut_alarm"] = self.v_futalarm.get()
         try:
             SETTINGS_PATH.write_text(json.dumps(s, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception:
@@ -316,6 +321,19 @@ class App(tk.Tk):
             q.put(("error", traceback.format_exc()))
         finally:
             q.put(("done", None))
+
+    def check_night_futures(self, manual=False):
+        """코스피200 야간선물 마감값 조회 → 로그 + 소리 + 팝업 (단타 스캐너와 같은 엔진 함수)."""
+        self.log(f"\n[{datetime.now():%H:%M:%S}] 코스피200 야간선물 조회{'' if manual else ' (08:50 알람)'}\n")
+
+        def job():
+            try:
+                D.init_feeds()
+                res = D.night_futures_summary()
+            except Exception as e:
+                res = {"ok": False, "text": f"야간선물 조회 실패: {e}"}
+            self.q.put(("alarm", res))
+        threading.Thread(target=job, daemon=True).start()
 
     def check_connection(self):
         self.log(f"\n[{datetime.now():%H:%M:%S}] 연결 점검\n")
@@ -466,6 +484,21 @@ class App(tk.Tk):
                 elif kind == "error":
                     self.log("\n[오류] " + val + "\n")
                     messagebox.showerror("오류", val[-800:])
+                elif kind == "alarm":
+                    self.log("  🔔 " + val["text"].replace("\n", "\n     ") + "\n")
+                    for e in (val.get("errors") or [])[:10]:
+                        self.log(f"     (참고) {e}\n")
+                    try:
+                        import winsound
+                        winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+                    except Exception:
+                        self.bell()
+                    try:
+                        self.deiconify(); self.lift(); self.attributes("-topmost", True)
+                        self.after(1500, lambda: self.attributes("-topmost", False))
+                    except Exception:
+                        pass
+                    (messagebox.showinfo if val.get("ok") else messagebox.showwarning)("코스피200 야간선물", val["text"])
                 elif kind == "idle":
                     self.v_status.set(f"{val} 완료")
                     self.btn_start.configure(state="normal"); self.btn_stop.configure(state="disabled")
@@ -476,7 +509,13 @@ class App(tk.Tk):
         self.after(150, self._poll)
 
     def _tick_clock(self):
-        self.v_clock.set(f"⏰ {datetime.now():%H:%M:%S}   {D.market_status()}")
+        now = datetime.now()
+        self.v_clock.set(f"⏰ {now:%H:%M:%S}   {D.market_status()}")
+        if (self.v_futalarm.get() and now.weekday() < 5 and self._fut_alarm_day != now.date()
+                and D.FUT_ALARM_HHMM <= (now.hour, now.minute) < (9, 0)):
+            self._fut_alarm_day = now.date()
+            if D.claim_futures_alarm():                 # 단타 창이 먼저 울렸으면 건너뜀
+                self.check_night_futures()
         self.after(1000, self._tick_clock)
 
     def _on_close(self):
