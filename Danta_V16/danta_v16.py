@@ -508,32 +508,76 @@ FUT_ALARM_HHMM = (8, 50)
 FUT_GAP_WARN = 1.0            # 야간선물 ±1%↑ 이면 갭 주의 문구
 
 
+_FUT_CODE_RE = None
+_FUT_DIAG = []                # 마스터 앞부분 (형식이 바뀌었을 때 로그로 보여주기 위함)
+_FUT_YEAR_SEQ = "6789012345ABCDEFGHJKLMNPQRSTVW"      # KRX 파생 연도코드: 1996='6' … 2025='W', 2026='6'(30년 주기)
+
+
 def parse_futures_master(text: str) -> list:
     """지수선물옵션 마스터(| 구분) → 코스피200 선물 [(단축코드, 종목명)] 근월물 먼저.
-    코스피200 선물 단축코드는 101로 시작(스프레드 401, 미니 105, 옵션 201/301 제외)."""
-    out = []
+    v17.2: 2025년 KRX 코드 개편(선물 '1…'→'A…')과 열 순서 변화에 대비해 줄 전체에서
+    코스피200 선물 단축코드(101xxx 또는 A01xxx)를 찾는다. 스프레드(4/D)·미니(x05)·옵션(2,3/B,C) 제외."""
+    global _FUT_CODE_RE
+    import re
+    if _FUT_CODE_RE is None:
+        _FUT_CODE_RE = re.compile(r"^[1A]01[0-9A-W][0-9A-C]{1,2}$")
+    out, seen = [], set()
     for line in text.splitlines():
-        p = [x.strip() for x in line.split("|")]
-        if len(p) < 4 or not p[1].startswith("101"):
+        p = [x.strip() for x in line.replace("\t", "|").split("|")]
+        code = next((x for x in p[:4] if _FUT_CODE_RE.match(x)), None)
+        if not code or code in seen:
             continue
-        out.append((p[1], p[3]))
+        seen.add(code)
+        name = next((x for x in p if x != code and (x.startswith("F ") or "선물" in x)), "") or code
+        out.append((code, name))
     digits = lambda nm: "".join(ch for ch in nm if ch.isdigit())      # 'F 202612' → '202612'
-    out.sort(key=lambda x: (digits(x[1]) or "999999", x[0]))
+    out.sort(key=lambda x: (digits(x[1]) if x[1] != x[0] else "999999", x[0]))
+    return out
+
+
+def futures_code_candidates(today=None) -> list:
+    """마스터를 못 읽을 때 쓰는 계산 코드. 코스피200 선물은 3·6·9·12월물, 만기 = 둘째 목요일."""
+    today = today or datetime.now().date()
+    months, y, m = [], today.year, today.month
+    while len(months) < 2:
+        if m % 3 == 0:
+            first = datetime(y, m, 1).date()
+            expiry = first + timedelta(days=(3 - first.weekday()) % 7 + 7)
+            if expiry >= today:
+                months.append((y, m))
+        m += 1
+        if m > 12:
+            y, m = y + 1, 1
+    out = []
+    for yy, mm in months:
+        yc = _FUT_YEAR_SEQ[(yy - 1996) % 30]
+        for pre in ("A01", "101"):
+            for ms in (f"{mm:02d}", "0123456789ABC"[mm]):
+                out.append((f"{pre}{yc}{ms}", f"F {yy}{mm:02d}(계산)"))
     return out
 
 
 def kospi200_futures_codes() -> list:
+    global _FUT_DIAG
     CACHE_DIR.mkdir(exist_ok=True)
     cp = CACHE_DIR / f"futmaster_{datetime.now():%Y%m%d}.json"
     if cp.exists():
         try:
-            return [tuple(x) for x in json.loads(cp.read_text(encoding="utf-8"))]
+            got = [tuple(x) for x in json.loads(cp.read_text(encoding="utf-8"))]
+            if got:
+                return got
         except Exception:
             pass
-    r = requests.get(FUT_MASTER_URL, timeout=30)
-    r.raise_for_status()
-    z = zipfile.ZipFile(io.BytesIO(r.content))
-    codes = parse_futures_master(z.read(z.namelist()[0]).decode("cp949", errors="replace"))
+    codes = []
+    try:
+        r = requests.get(FUT_MASTER_URL, timeout=30)
+        r.raise_for_status()
+        z = zipfile.ZipFile(io.BytesIO(r.content))
+        text = z.read(z.namelist()[0]).decode("cp949", errors="replace")
+        _FUT_DIAG = [ln[:110] for ln in text.splitlines()[:3]]
+        codes = parse_futures_master(text)
+    except Exception as e:
+        _FUT_DIAG = [f"선물 마스터 다운로드 실패: {e}"]
     if codes:
         for old in CACHE_DIR.glob("futmaster_*.json"):
             old.unlink(missing_ok=True)
@@ -560,12 +604,11 @@ def fetch_futures_quote(code: str, div: str) -> Optional[dict]:
 
 def night_futures_summary() -> dict:
     """근월물 코스피200 선물의 야간장 마감값. 반환 {"ok","source","text","rate",...}."""
-    codes = kospi200_futures_codes()
-    if not codes:
-        return {"ok": False, "text": "선물 종목코드를 못 찾음 (선물 마스터 형식 변경 가능성)"}
+    master = kospi200_futures_codes()
+    codes = master[:2] + [c for c in futures_code_candidates() if c[0] not in {m[0] for m in master[:2]}]
     errs = []
     for div, source in (("CM", "야간선물"), ("F", "주간선물(야간 조회 불가 — 08:45 이후 현재가)")):
-        for code, name in codes[:2]:
+        for code, name in codes:
             try:
                 q = fetch_futures_quote(code, div)
             except Exception as e:
@@ -581,8 +624,12 @@ def night_futures_summary() -> dict:
                 hint = "밤사이 큰 변동 없음"
             text = (f"코스피200 {source} {q['name'] or name} ({code})\n"
                     f"{q['price']:,.2f}  전일대비 {q['diff']:+,.2f} ({rate:+.2f}%)\n{hint}")
-            return {"ok": True, "source": source, "code": code, "text": text, "errors": errs, **q}
-    return {"ok": False, "text": "선물 시세 조회 실패 — " + " / ".join(errs[:4]), "errors": errs}
+            return {"ok": True, "source": source, "code": code, "text": text,
+                    "errors": errs[-3:] if not master else [], **q}
+    diag = ([] if master else ["선물 마스터에서 코드를 못 읽음 → 계산 코드로 시도함"]) + \
+        [f"마스터 {i + 1}행: {ln}" for i, ln in enumerate(_FUT_DIAG)]
+    return {"ok": False, "text": "선물 시세 조회 실패 — 로그의 (참고) 줄을 캡처해서 보여줘",
+            "errors": errs[:6] + diag}
 
 
 # ── DART 악재 공시 (선택) ─────────────────────────────────────────────
@@ -2384,6 +2431,13 @@ def selftest() -> int:
          "5|201VC400|KR4201VC4003|C 202612 400.0|0|400|1|2001|KOSPI200"
     fc = parse_futures_master(fm)
     check(f"K 선물 마스터 → 코스피200 선물만, 근월물 먼저: {fc}", [c for c, _ in fc] == ["101VC", "101W03"])
+    fm2 = "A01703|KR4A01703000|F 202703|1\nA01612|KR4A01612005|F 202612|1\nD01612S|KR4D0161S|SP|1\nA05612|KR4A05612|미니F 202612|1\nB01612400|x|C 202612 400|5"
+    check(f"K 2025 개편 코드(A01…)·열 순서 달라도 인식: {parse_futures_master(fm2)}",
+          [c for c, _ in parse_futures_master(fm2)] == ["A01612", "A01703"])
+    cc = [c for c, _ in futures_code_candidates(datetime(2026, 11, 16).date())]
+    check(f"K 마스터 없이 계산: 2026-11-16 → 12월물 먼저 {cc[:4]}", cc[:4] == ["A01612", "A016C", "101612", "1016C"] and "A01703" in cc)
+    cc = [c for c, _ in futures_code_candidates(datetime(2026, 12, 11).date())]
+    check(f"K 만기(12월 둘째 목요일 12/10) 지나면 3월물로: {cc[0]}", cc[0] == "A01703")
     fq = parse_futures_quote({"futs_prpr": "512.35", "futs_prdy_vrss": "6.10", "futs_prdy_ctrt": "1.18",
                               "prdy_vrss_sign": "5", "hts_kor_isnm": "F 202612"})
     check(f"K 하락 부호(5)인데 양수로 온 값 → 음수 보정: {fq['diff']} {fq['rate']}", fq["diff"] == -6.10 and fq["rate"] == -1.18)

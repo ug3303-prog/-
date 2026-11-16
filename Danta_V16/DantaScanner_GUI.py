@@ -750,7 +750,7 @@ class App(tk.Tk):
                     messagebox.showerror("오류", val[-800:])
                 elif kind == "alarm":
                     self.log("  🔔 " + val["text"].replace("\n", "\n     ") + "\n")
-                    for e in (val.get("errors") or [])[:4]:
+                    for e in (val.get("errors") or [])[:10]:
                         self.log(f"     (참고) {e}\n")
                     try:
                         import winsound
