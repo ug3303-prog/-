@@ -1018,7 +1018,30 @@ def combine_thresholds(regime: dict, mgate: dict) -> dict:
     base = dict(GRADE)
     reg_extra = regime["thresholds"]["선도매수"] - base["선도매수"]
     extra = min(MAX_EXTRA_THRESHOLD, reg_extra + (mgate.get("extra") or 0))
-    return {k: v + extra for k, v in base.items()}
+    # v17.4: '관심'은 매수 신호가 아니라 관찰 목록 → 장이 나빠도 기준을 올리지 않는다
+    #        (11/19: +25 가산으로 관심≥53이 되어 후보가 1개만 남고 관찰 목록까지 비었음)
+    return {k: (v if k == "관심" else v + extra) for k, v in base.items()}
+
+
+_BLOCK_KINDS = [("하락 추세", "하락추세"), ("악재공시", "악재공시"), ("거래대금 부족", "거래대금부족"),
+                ("이격", "이격과다"), ("급등 말기", "급등말기"), ("급등", "당일급등"), ("갭업", "갭업"),
+                ("데이터 부족", "데이터부족"), ("시세 이상", "시세이상")]
+
+
+def scan_breakdown(results: list) -> str:
+    """스캔 결과가 왜 이렇게 나왔는지 한 줄 요약 — 등급별 개수 + 차단 사유별 개수(중복 포함)."""
+    grades, kinds = {}, {}
+    for r in results:
+        grades[r["grade"]] = grades.get(r["grade"], 0) + 1
+        seen = set()
+        for b in r.get("blocks") or []:
+            k = next((lab for key, lab in _BLOCK_KINDS if key in b), "기타(경고·정지 등)")
+            if k not in seen:
+                seen.add(k); kinds[k] = kinds.get(k, 0) + 1
+    g = " · ".join(f"{k[1:] if not k[0].isalnum() else k} {grades[k]}" for k in
+                   ("🚀선도매수", "⬆매수대기", "👀관심", "⬇제외", "⛔차단") if grades.get(k))
+    b = " · ".join(f"{k} {v}" for k, v in sorted(kinds.items(), key=lambda x: -x[1]))
+    return f"등급: {g or '-'}" + (f"\n  차단 사유(중복 포함): {b}" if b else "")
 
 # ══════════════════════════════════════════════════════════════════
 # v15 핵심: 스코어 계산 (v14 뼈대 유지 + 휴림로봇형 오판 수정)
@@ -2380,6 +2403,12 @@ def selftest() -> int:
     th = combine_thresholds({"thresholds": {k: v + 20 for k, v in GRADE.items()}}, {"extra": 15})
     check(f"H 레짐+20 & 지수+15 → 합산 상한 +{MAX_EXTRA_THRESHOLD}: 선도 {th['선도매수']}",
           th["선도매수"] == GRADE["선도매수"] + MAX_EXTRA_THRESHOLD)
+    check(f"H 관심 기준은 장이 나빠도 고정: 관심 {th['관심']} / 대기 {th['매수대기']}",
+          th["관심"] == GRADE["관심"] and th["매수대기"] == GRADE["매수대기"] + MAX_EXTRA_THRESHOLD)
+    bd_ = scan_breakdown([{"grade": "⛔차단", "blocks": ["하락 추세 (60일선 아래 + 60일선 하락)", "악재공시 x"]},
+                          {"grade": "⛔차단", "blocks": ["하락 추세 (20일선 아래 + 20일선 하락)"]},
+                          {"grade": "⬇제외", "blocks": []}, {"grade": "👀관심", "blocks": []}])
+    check(f"H 스캔 요약: {bd_!r}", "하락추세 2" in bd_ and "악재공시 1" in bd_ and "제외 1" in bd_ and "차단 2" in bd_)
 
     # I. v16.1 선도매수 자격·정원 (10/2 스캔에서 28개 선도매수가 나온 문제)
     closes = [10000 + i * 60 for i in range(65)] + [14100, 14000, 13700, 13500, 13400]

@@ -426,6 +426,9 @@ class App(tk.Tk):
             q.put(("log", f"  지수 게이트: {mgate['desc']}\n"))
             q.put(("log", f"  최종 등급 기준: 선도≥{th['선도매수']:.0f} 대기≥{th['매수대기']:.0f} 관심≥{th['관심']:.0f}\n"))
             q.put(("log", f"  시간대: {t_label} — {t_desc}\n"))
+            q.put(("log", "  " + D.scan_breakdown(results) + "\n"))
+            if th["선도매수"] != D.GRADE["선도매수"]:
+                q.put(("log", "  (장이 나빠 선도·대기 기준만 올림 — 관심은 관찰용이라 기준 고정)\n"))
             if momentum:
                 q.put(("log", "  🚀 모멘텀 모드 ON (상승장: 상단 돌파·주도주 우선)\n"))
             q.put(("result", (results, portfolio, regime, t_label)))

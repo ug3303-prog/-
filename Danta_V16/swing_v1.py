@@ -389,7 +389,7 @@ def run_scan(p, log=print, progress=None, should_stop=None, write_excel=True):
     gb = p.get("grade") or GRADE_BASE
     mgate = D.assess_market_gate()
     extra = min(20, mgate.get("extra", 0) or 0)
-    th = {k: v + extra for k, v in gb.items()}
+    th = {k: (v if "관심" in k else v + extra) for k, v in gb.items()}   # 관심은 관찰용 — 기준 고정
 
     results = []
     for st, hist, rt, inv, fil in collected:
@@ -428,6 +428,7 @@ def run_scan(p, log=print, progress=None, should_stop=None, write_excel=True):
     regime = {"label": mgate.get("label", "-"), "gate": mgate, "thresholds": th, "n_lead": n_lead}
     log(f"  완료 — 조회 {len(collected)}개 / 선도 {n_lead}개 / KIS 호출 {D._KIS.calls}회\n")
     log(f"  지수 게이트: {mgate.get('desc', '')}\n")
+    log("  " + D.scan_breakdown(results) + "\n")
     log(f"  등급 기준: 선도≥{th['🚀선도매수']:.0f} 대기≥{th['⬆매수대기']:.0f} 관심≥{th['👀관심']:.0f}\n")
 
     if write_excel:
